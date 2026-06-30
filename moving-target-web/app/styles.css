@@ -1,0 +1,90 @@
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #eef2f3;
+  color: #1f2933;
+}
+button {
+  border: 1px solid #9aa8b3;
+  border-radius: 5px;
+  background: #f7f9fa;
+  padding: 7px 10px;
+  font: inherit;
+  cursor: pointer;
+}
+.login {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+}
+.login section {
+  width: min(420px, calc(100vw - 32px));
+  border: 1px solid #c8d0d7;
+  border-radius: 8px;
+  background: #fff;
+  padding: 22px;
+}
+.app-header {
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 18px;
+  background: #fff;
+  border-bottom: 1px solid #c8d0d7;
+}
+.app-header h1 { margin: 0; font-size: 17px; }
+.app-header span { font-size: 12px; color: #52616f; }
+.dashboard { padding: 14px; }
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(110px, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.metric {
+  background: #fff;
+  border: 1px solid #c8d0d7;
+  border-radius: 6px;
+  padding: 10px;
+}
+.metric span { display: block; font-size: 11px; color: #52616f; }
+.metric strong { display: block; margin-top: 3px; font-size: 15px; overflow-wrap: anywhere; }
+.content-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 12px;
+}
+.map-pane, .details {
+  min-height: calc(100vh - 110px);
+  background: #fff;
+  border: 1px solid #c8d0d7;
+  border-radius: 6px;
+}
+.map-placeholder {
+  height: 100%;
+  display: grid;
+  place-content: center;
+  gap: 8px;
+  text-align: center;
+  color: #52616f;
+}
+.details { padding: 14px; overflow: auto; }
+.details h2 { font-size: 15px; margin: 0 0 12px; }
+.details dl { display: grid; grid-template-columns: 100px 1fr; gap: 8px; font-size: 13px; }
+.details dt { color: #52616f; }
+.details dd { margin: 0; overflow-wrap: anywhere; }
+.error {
+  margin-bottom: 12px;
+  border: 1px solid #f0b6aa;
+  background: #fff4f1;
+  border-radius: 6px;
+  padding: 10px;
+}
+@media (max-width: 900px) {
+  .metrics { grid-template-columns: repeat(2, minmax(110px, 1fr)); }
+  .content-grid { grid-template-columns: 1fr; }
+  .map-pane, .details { min-height: 320px; }
+}

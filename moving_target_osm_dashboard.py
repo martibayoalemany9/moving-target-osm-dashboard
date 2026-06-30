@@ -38,6 +38,14 @@ OSM_COUNTRY_EXTRACTS = {
     "austria": "https://download.geofabrik.de/europe/austria-latest.osm.pbf",
     "belgium": "https://download.geofabrik.de/europe/belgium-latest.osm.pbf",
 }
+OSM_COUNTRY_BOUNDS = {
+    "germany": (47.2, 5.8, 55.1, 15.1),
+    "france": (41.0, -5.3, 51.3, 9.7),
+    "luxembourg": (49.4, 5.7, 50.2, 6.6),
+    "switzerland": (45.8, 5.9, 47.9, 10.6),
+    "austria": (46.3, 9.5, 49.1, 17.2),
+    "belgium": (49.4, 2.5, 51.6, 6.5),
+}
 
 
 STATE = {
@@ -71,6 +79,8 @@ STATE = {
     "config": {},
     "status": {},
     "osm_downloads": {},
+    "collection_enabled": True,
+    "last_router_geo": None,
 }
 STATE_LOCK = threading.Lock()
 
@@ -511,6 +521,19 @@ def parse_traceroute(output):
     return hops
 
 
+def hop_display_name(hop):
+    if not hop:
+        return ""
+    host = str(hop.get("host") or "").strip()
+    if host and host != "*":
+        return host
+    ips = hop.get("ips") or []
+    if ips:
+        return ips[0]
+    raw = str(hop.get("raw") or "").strip()
+    return raw if raw and raw != "* * *" else ""
+
+
 def geoip_lookup(ip):
     if not ip or not is_public_ip(ip):
         return None
@@ -549,6 +572,7 @@ def router_geo_sample(target=TRACE_TARGET):
     trace = run(["traceroute", "-m", "7", "-w", "1", target], timeout=10)
     hops = parse_traceroute(trace["stdout"])
     selected = None
+    first_hop = hops[0] if hops else None
     for hop in hops:
         for ip in hop["public_ips"]:
             selected = {"hop": hop["hop"], "ip": ip, "host": hop.get("host"), "avg_rtt_ms": hop.get("avg_rtt_ms")}
@@ -568,6 +592,9 @@ def router_geo_sample(target=TRACE_TARGET):
     return {
         "target": target,
         "ok": trace["ok"] or bool(hops),
+        "first_hop": first_hop,
+        "access_point_name": hop_display_name(first_hop),
+        "access_point_definition": "first hop returned by traceroute",
         "selected_public_hop": selected,
         "serving_node": serving_node,
         "geoip": geo,
@@ -1114,6 +1141,7 @@ def collect_one(config, adb, serial, adb_status):
         now = time.time()
         with STATE_LOCK:
             last_trace = STATE.get("last_trace_time", 0)
+            last_router_geo = STATE.get("last_router_geo")
         if now - last_trace >= config["trace_interval"]:
             sample["router_geo"] = router_geo_sample(config.get("trace_target") or TRACE_TARGET)
             if not sample.get("provider"):
@@ -1122,6 +1150,9 @@ def collect_one(config, adb, serial, adb_status):
                 sample["provider"] = geo.get("org") or hop.get("host") or (sample.get("dns_servers") or [""])[0]
             with STATE_LOCK:
                 STATE["last_trace_time"] = now
+                STATE["last_router_geo"] = sample["router_geo"]
+        elif last_router_geo:
+            sample["router_geo"] = last_router_geo
     return sample
 
 
@@ -1299,29 +1330,190 @@ def start_osm_country_download(country):
         }
     OSM_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     target = OSM_DOWNLOAD_DIR / f"{normalized}-latest.osm.pbf"
+    absolute_target = target.resolve()
+    existing_bytes = target.stat().st_size if target.exists() else 0
     with STATE_LOCK:
+        current = STATE["osm_downloads"].get(normalized) or {}
+        if current.get("status") == "downloading":
+            return {"ok": True, **current}
         STATE["osm_downloads"][normalized] = {
             "status": "downloading",
             "country": normalized,
             "url": url,
-            "path": str(target),
+            "path": str(absolute_target),
+            "bytes": existing_bytes,
+            "total_bytes": None,
+            "percent": None,
+            "resumed_from_bytes": existing_bytes,
             "started_utc": utc_now(),
         }
 
     def worker():
         try:
-            urllib.request.urlretrieve(url, target)
+            resume_from = target.stat().st_size if target.exists() else 0
+            req = urllib.request.Request(url)
+            if resume_from > 0:
+                req.add_header("Range", f"bytes={resume_from}-")
+            with urllib.request.urlopen(req, timeout=30) as response:
+                total = response.headers.get("Content-Length")
+                content_range = response.headers.get("Content-Range")
+                try:
+                    total_bytes = int(total) + resume_from if total else None
+                except ValueError:
+                    total_bytes = None
+                if content_range:
+                    match = re.search(r"/(\d+)$", content_range)
+                    if match:
+                        total_bytes = int(match.group(1))
+                if response.status == 200 and resume_from:
+                    resume_from = 0
+                mode = "ab" if resume_from else "wb"
+                downloaded = resume_from
+                with target.open(mode) as outf:
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        outf.write(chunk)
+                        downloaded += len(chunk)
+                        progress = {
+                            "status": "downloading",
+                            "country": normalized,
+                            "url": url,
+                            "path": str(absolute_target),
+                            "bytes": downloaded,
+                            "total_bytes": total_bytes,
+                            "percent": round(downloaded / total_bytes * 100, 1) if total_bytes else None,
+                            "resumed_from_bytes": resume_from,
+                            "started_utc": STATE["osm_downloads"].get(normalized, {}).get("started_utc"),
+                        }
+                        with STATE_LOCK:
+                            STATE["osm_downloads"][normalized] = progress
             size = target.stat().st_size if target.exists() else 0
-            status = {"status": "complete", "country": normalized, "url": url, "path": str(target), "bytes": size, "finished_utc": utc_now()}
+            status = {"status": "complete", "country": normalized, "url": url, "path": str(absolute_target), "bytes": size, "total_bytes": size, "percent": 100.0, "finished_utc": utc_now()}
             add_log("info", "osm-download", f"Downloaded OSM extract for {normalized}", status)
         except Exception as exc:
-            status = {"status": "failed", "country": normalized, "url": url, "path": str(target), "error": str(exc), "finished_utc": utc_now()}
+            status = {"status": "failed", "country": normalized, "url": url, "path": str(absolute_target), "error": str(exc), "finished_utc": utc_now()}
             add_log("error", "osm-download", f"OSM extract download failed for {normalized}", status)
         with STATE_LOCK:
             STATE["osm_downloads"][normalized] = status
 
     threading.Thread(target=worker, daemon=True).start()
-    return {"ok": True, "status": "downloading", "country": normalized, "url": url, "path": str(target)}
+    return {"ok": True, "status": "downloading", "country": normalized, "url": url, "path": str(absolute_target), "bytes": existing_bytes, "resumed_from_bytes": existing_bytes}
+
+
+def osm_storage_status():
+    OSM_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    files = []
+    total_bytes = 0
+    for path in sorted(OSM_DOWNLOAD_DIR.glob("*.osm.pbf")):
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        total_bytes += size
+        files.append({"name": path.name, "path": str(path.resolve()), "bytes": size})
+    with STATE_LOCK:
+        downloads = dict(STATE.get("osm_downloads") or {})
+    return {
+        "ok": True,
+        "directory": str(OSM_DOWNLOAD_DIR.resolve()),
+        "total_bytes": total_bytes,
+        "files": files,
+        "downloads": downloads,
+    }
+
+
+def downloaded_osm_countries():
+    countries = set()
+    for path in OSM_DOWNLOAD_DIR.glob("*-latest.osm.pbf"):
+        country = path.name.replace("-latest.osm.pbf", "")
+        if path.exists() and path.stat().st_size > 0:
+            countries.add(country)
+    with STATE_LOCK:
+        for country, status in (STATE.get("osm_downloads") or {}).items():
+            if status.get("status") == "complete":
+                countries.add(country)
+    return countries
+
+
+def country_for_point(lat, lon):
+    for country, (min_lat, min_lon, max_lat, max_lon) in OSM_COUNTRY_BOUNDS.items():
+        if min_lat <= lat <= max_lat and min_lon <= lon <= max_lon:
+            return country
+    return None
+
+
+def osm_consistency_check(config):
+    downloaded = downloaded_osm_countries()
+    redis_info = {"enabled": False}
+    samples = []
+    if config.get("redis_url"):
+        try:
+            redis_client = RedisClient(config["redis_url"])
+            samples = redis_client.load_samples(config.get("redis_prefix") or "moving_client_data", count=REDIS_SAMPLE_HISTORY_COUNT)
+            redis_info = {"enabled": True, "ok": True, "sample_count": len(samples)}
+        except Exception as exc:
+            redis_info = {"enabled": True, "ok": False, "error": str(exc)}
+    if not samples:
+        with STATE_LOCK:
+            samples = list(STATE.get("samples") or [])
+
+    gps_samples = []
+    matched = []
+    unmatched = []
+    missing_countries = set()
+    outside_supported = 0
+    for sample in samples:
+        loc = sample.get("location") or {}
+        if loc.get("lat") is None or loc.get("lon") is None:
+            continue
+        try:
+            lat = float(loc["lat"])
+            lon = float(loc["lon"])
+        except (TypeError, ValueError):
+            continue
+        country = country_for_point(lat, lon)
+        row = {
+            "sequence": sample.get("sequence"),
+            "timestamp_utc": sample.get("timestamp_utc"),
+            "lat": lat,
+            "lon": lon,
+            "country": country,
+        }
+        gps_samples.append(row)
+        if country and country in downloaded:
+            matched.append(row)
+        else:
+            unmatched.append(row)
+            if country:
+                missing_countries.add(country)
+            else:
+                outside_supported += 1
+
+    lines = [
+        f"Redis samples read: {len(samples)}" if redis_info.get("enabled") else f"In-memory samples read: {len(samples)}",
+        f"GPS samples: {len(gps_samples)}",
+        f"Matched by downloaded country extract: {len(matched)}",
+        f"Unmatched: {len(unmatched)}",
+        f"Downloaded countries: {', '.join(sorted(downloaded)) or 'none'}",
+        f"Countries not yet downloaded: {', '.join(sorted(missing_countries)) or 'none'}",
+        f"Outside supported country bounds: {outside_supported}",
+    ]
+    if redis_info.get("enabled") and not redis_info.get("ok"):
+        lines.append(f"Redis read error: {redis_info.get('error')}")
+    return {
+        "ok": True,
+        "redis": redis_info,
+        "sample_count": len(samples),
+        "gps_sample_count": len(gps_samples),
+        "matched_count": len(matched),
+        "unmatched_count": len(unmatched),
+        "downloaded_countries": sorted(downloaded),
+        "missing_countries": sorted(missing_countries),
+        "outside_supported_country_bounds": outside_supported,
+        "report": "\n".join(lines),
+    }
 
 
 def kml_escape(value):
@@ -1410,6 +1602,11 @@ def collector_loop(config):
     probe_count = 0
     while True:
         started = time.time()
+        with STATE_LOCK:
+            collection_enabled = bool(STATE.get("collection_enabled", True))
+        if not collection_enabled:
+            time.sleep(max(0.5, min(2.0, config["interval"])))
+            continue
         if not serial or probe_count % 4 == 0:
             with STATE_LOCK:
                 selected_serial = STATE.get("adb_serial_override") or config.get("serial")
@@ -1467,6 +1664,21 @@ def page_html():
     .metric { border-left: 3px solid #557a95; padding-left: 8px; min-width: 0; }
     .label { font-size: 11px; color: #52616f; }
     .value { font-size: 16px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .coordinate-value { font-size: 13px; font-variant-numeric: tabular-nums; white-space: normal; line-height: 1.2; }
+    .geo-name { display: block; margin-top: 2px; font-size: 10px; line-height: 1.15; color: #52616f; font-weight: 500; }
+    .gps-value {
+      display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px 8px;
+      white-space: normal; overflow: visible; text-overflow: clip; font-size: 12px; font-weight: 500;
+    }
+    .gps-item-label {
+      display: block; font-size: 10px; line-height: 1.15; color: #52616f; font-weight: 600;
+      text-transform: uppercase;
+    }
+    .gps-item-number {
+      display: block; margin-top: 2px; font-size: 13px; line-height: 1.2; color: #1f2933;
+      font-variant-numeric: tabular-nums;
+    }
+    .gps-meta { grid-column: 1 / -1; font-size: 11px; line-height: 1.2; color: #52616f; font-weight: 500; }
     .side { width: 320px; max-width: 35vw; }
     .small { font-size: 12px; line-height: 1.35; color: #3a4750; }
     .legend { display: grid; grid-template-columns: repeat(5, auto); gap: 7px; align-items: center; margin-top: 7px; }
@@ -1492,6 +1704,9 @@ def page_html():
     .param-grid { display: grid; grid-template-columns: 150px 1fr; gap: 7px 12px; font-size: 13px; }
     .param-grid code { font-size: 12px; }
     .modal-note { margin-top: 12px; padding-top: 10px; border-top: 1px solid #d8dee4; font-size: 13px; }
+    .release-list { display: grid; gap: 10px; font-size: 13px; line-height: 1.4; }
+    .release-item { border-top: 1px solid #d8dee4; padding-top: 9px; }
+    .release-date { font-weight: 700; color: #24313c; }
     .chart-panel {
       position: absolute; z-index: 1000; left: 12px; right: 12px; bottom: 12px;
       background: var(--panel-bg); border: 1px solid #c8d0d7; border-radius: 6px;
@@ -1507,6 +1722,11 @@ def page_html():
     .chart-panel.collapsed canvas, .chart-panel.collapsed .chart-extra { display: none; }
     .chart-head { display: flex; gap: 16px; align-items: center; font-size: 12px; color: #3a4750; margin-bottom: 5px; }
     .chart-actions { margin-left: auto; display: inline-flex; gap: 6px; align-items: center; }
+    .plot-toggle {
+      display: inline-flex; align-items: center; gap: 5px; border: 0; background: transparent;
+      padding: 2px 4px; font-size: 12px; color: #3a4750;
+    }
+    .plot-toggle.off { opacity: .38; text-decoration: line-through; }
     .icon-btn {
       width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center;
       padding: 0; font-size: 16px; line-height: 1; font-weight: 700;
@@ -1540,6 +1760,16 @@ def page_html():
     .settings-grid input[type="range"] { width: 100%; }
     #routeTrack { min-height: 208px; overflow-y: auto; }
     .settings-hint { margin-top: 12px; font-size: 12px; line-height: 1.45; color: #3a4750; }
+    .osm-progress { display: grid; gap: 4px; min-width: min(420px, 100%); }
+    .osm-progress progress { width: 100%; height: 12px; }
+    .osm-path { overflow-wrap: anywhere; color: #52616f; }
+    .osm-file-list { display: grid; gap: 6px; }
+    .osm-file-item { border-top: 1px solid #d8dee4; padding-top: 6px; }
+    .osm-file-name { font-weight: 700; color: #24313c; }
+    .osm-report {
+      white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid #d6dde3;
+      background: #f4f6f8; padding: 7px 8px; border-radius: 5px; font-size: 12px;
+    }
     .tabs { display: flex; gap: 6px; margin: 4px 0 8px; }
     .tab.active { background: #dfe8ee; border-color: #6f8799; }
     .tab-pane.hidden { display: none; }
@@ -1620,9 +1850,9 @@ def page_html():
           <div class="metric"><div class="label">Samples</div><div class="value" id="samples">0</div></div>
           <div class="metric"><div class="label">Avg latency</div><div class="value" id="avg">--</div></div>
           <div class="metric"><div class="label">Speed</div><div class="value" id="speed">--</div></div>
-          <div class="metric"><div class="label">Wi-Fi</div><div class="value" id="wifi">--</div></div>
-          <div class="metric"><div class="label">GPS</div><div class="value" id="gps">waiting</div></div>
-          <div class="metric"><div class="label">Serving cell</div><div class="value" id="cell">waiting</div></div>
+          <div class="metric"><div class="label">Access point</div><div class="value" id="wifi">--</div></div>
+          <div class="metric"><div class="label">GPS latitude</div><div class="value coordinate-value" id="latitude">--</div></div>
+          <div class="metric"><div class="label">GPS longitude</div><div class="value coordinate-value" id="longitude">--</div></div>
         </div>
         <div class="legend small">
           <span><i class="swatch" style="background:#1a9850"></i>&lt;80</span>
@@ -1634,6 +1864,7 @@ def page_html():
         <div class="wifi-edit">
           <input id="wifiLabel" placeholder="Wi-Fi name override">
           <button id="saveWifiLabel" type="button">Save Wi-Fi name</button>
+          <button id="detectMacWifi" type="button">Detect Mac Wi-Fi</button>
         </div>
         <div class="adb-row">
           <select id="adbDevices"><option value="">ADB auto/no device</option></select>
@@ -1641,10 +1872,12 @@ def page_html():
           <button id="connectAdb" type="button">Connect ADB</button>
         </div>
         <div class="actions">
+          <button id="toggleCollection" type="button">Stop collection</button>
           <button id="zoomLatest" type="button">Zoom latest</button>
           <button id="startBrowserGps" type="button">Start browser GPS</button>
           <button id="startMotion" type="button">Start accelerometer</button>
           <button id="exportKml" type="button">Export KML</button>
+          <button id="openReleaseNotes" type="button">Release notes</button>
           <button id="openHelp" type="button">5G parameters</button>
         </div>
         <div class="status" id="status">Connecting to local sampler...</div>
@@ -1672,8 +1905,11 @@ def page_html():
   <div class="chart-panel" id="chartPanel">
     <div class="chart-head">
       <strong>Time Plot</strong>
-      <span class="line-key"><i class="line-swatch" style="background:#d73027"></i>Latency ms</span>
-      <span class="line-key"><i class="line-swatch" style="background:#9b5de5"></i>Speed km/h</span>
+      <button class="plot-toggle" data-plot-key="latency" type="button"><i class="line-swatch" style="background:#d73027"></i>Latency ms</button>
+      <button class="plot-toggle" data-plot-key="speed" type="button"><i class="line-swatch" style="background:#9b5de5"></i>Speed km/h</button>
+      <button class="plot-toggle" data-plot-key="gpsAccuracy" type="button"><i class="line-swatch" style="background:#2b6cb0"></i>GPS accuracy m</button>
+      <button class="plot-toggle" data-plot-key="wifiSignal" type="button"><i class="line-swatch" style="background:#2f855a"></i>Wi-Fi RSSI</button>
+      <button class="plot-toggle" data-plot-key="accel" type="button"><i class="line-swatch" style="background:#f59f00"></i>Accel</button>
       <span id="chartScale">Waiting for samples</span>
       <span class="chart-actions">
         <button id="plotPageLeft" class="icon-btn" type="button" title="Page plot left" aria-label="Page plot left">&lsaquo;</button>
@@ -1749,6 +1985,14 @@ def page_html():
           <button id="downloadOsmCountry" type="button">Download OSM</button>
           <span id="osmDownloadStatus" class="osm-status">Idle</span>
         </div>
+        <label>OSM storage</label>
+        <div class="osm-progress">
+          <div id="osmStorageInfo" class="osm-status">Checking local OSM storage...</div>
+          <div id="osmStoragePath" class="osm-path"></div>
+          <div id="osmFileList" class="osm-file-list"></div>
+          <button id="checkOsmConsistency" type="button">Check OSM consistency</button>
+          <div id="osmConsistencyReport" class="osm-report">No consistency check run yet.</div>
+        </div>
       </div>
       <div class="settings-hint">
         HTML5 GPS is permission-based. On phones it may use GNSS, Wi-Fi, cellular, Bluetooth, and IP hints, but JavaScript only receives latitude, longitude, altitude fields when present, speed/heading when available, and an accuracy radius in meters. Android's coarse/fine location choice is handled by the OS permission layer; browsers usually expose the resulting accuracy value, not a direct "coarse" or "fine" flag.
@@ -1788,6 +2032,20 @@ def page_html():
       </div>
     </div>
   </div>
+  <div class="modal" id="releaseModal" role="dialog" aria-modal="true" aria-labelledby="releaseTitle">
+    <div class="modal-card">
+      <h2 id="releaseTitle">Release Notes</h2>
+      <div class="release-list">
+        <div class="release-item"><div class="release-date">2026-06-30</div>Renamed the project to Moving Target OSM Dashboard, uploaded the repository to GitHub, and renamed the offline client to <code>moving_client_data.py</code>.</div>
+        <div class="release-item"><div class="release-date">2026-06-30</div>Added compact latitude/longitude display, collection start/stop controls, release notes, sensor status, traceroute access-point metadata, plot toggles, and OSM download progress/storage reporting.</div>
+        <div class="release-item"><div class="release-date">2026-06-29</div>Added Redis persistence, KML export, route correction, error/event logs, settings, and OSM extract download support.</div>
+        <div class="release-item"><div class="release-date">2026-06-25</div>Initial realtime OpenStreetMap dashboard with latency sampling, GPS, ADB radio metadata, Wi-Fi context, and route visualization.</div>
+      </div>
+      <div class="actions">
+        <button id="closeReleaseNotes" type="button">Close</button>
+      </div>
+    </div>
+  </div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
     const map = L.map('map', { zoomControl: true }).setView([51.1657, 10.4515], 6);
@@ -1824,6 +2082,7 @@ def page_html():
     let hoverToken = 0;
     let latestGpsCityToken = 0;
     let plotFollowLatest = true;
+    let osmStatusTimer = null;
     const cityCache = new Map();
 
     function color(ms) {
@@ -1926,31 +2185,44 @@ def page_html():
         if (!res.ok) return '';
         const data = await res.json();
         const address = data.address || {};
-        const city = address.city || address.town || address.village || address.municipality || address.county || address.state || '';
-        cityCache.set(key, city);
-        return city;
+        const street = [address.road, address.house_number].filter(Boolean).join(' ');
+        const city = address.city || address.town || address.village || address.municipality || address.county || '';
+        const region = address.state || address.region || '';
+        const country = address.country || '';
+        const poiName = data.name || address.amenity || address.shop || address.tourism || address.leisure || '';
+        const poiType = data.type || data.category || address.shop || address.amenity || '';
+        const label = [street, city, region, country].filter(Boolean).join(', ');
+        const poi = [poiName, poiType].filter(Boolean).join(' · ');
+        const enriched = { label, poi, rawType: data.type || '', category: data.category || '' };
+        cityCache.set(key, enriched);
+        return enriched;
       } catch (_) {
-        cityCache.set(key, '');
-        return '';
+        cityCache.set(key, { label: '', poi: '', rawType: '', category: '' });
+        return { label: '', poi: '', rawType: '', category: '' };
       }
     }
 
     async function reverseCity(sample, token) {
       const loc = sample?.location || {};
-      const city = await lookupCityForCoords(loc.lat, loc.lon);
-      return token === hoverToken ? city : '';
+      const place = await lookupCityForCoords(loc.lat, loc.lon);
+      return token === hoverToken ? place : { label: '', poi: '', rawType: '', category: '' };
     }
 
-    function renderGpsMetric(sample, cityText = '') {
+    function renderGpsMetric(sample, place = null) {
       const loc = sample?.location || {};
-      const gpsEl = document.getElementById('gps');
+      const latEl = document.getElementById('latitude');
+      const lonEl = document.getElementById('longitude');
       if (!Number.isFinite(loc.lat) || !Number.isFinite(loc.lon)) {
-        gpsEl.innerHTML = 'no GPS';
+        latEl.textContent = '--';
+        lonEl.textContent = '--';
         return;
       }
-      const source = loc.source || (loc.interpolated ? 'interpolated' : 'unknown');
-      const city = cityText ? `<br>City: ${esc(cityText)}` : '';
-      gpsEl.innerHTML = `Latitude: ${Number(loc.lat).toFixed(5)}<br>Longitude: ${Number(loc.lon).toFixed(5)}${city}<br>${esc(source)}`;
+      const label = typeof place === 'string' ? place : (place?.label || '');
+      const poi = typeof place === 'object' ? place.poi : '';
+      const geo = label ? `<span class="geo-name">${esc(label)}</span>` : '';
+      const poiLine = poi ? `<span class="geo-name">POI: ${esc(poi)}</span>` : '';
+      latEl.innerHTML = `${Number(loc.lat).toFixed(5)}${geo}`;
+      lonEl.innerHTML = `${Number(loc.lon).toFixed(5)}${poiLine || geo}`;
     }
 
     function updateLatestGpsMetric(sample) {
@@ -1959,8 +2231,12 @@ def page_html():
       renderGpsMetric(sample);
       const loc = sample?.location || {};
       if (!Number.isFinite(loc.lat) || !Number.isFinite(loc.lon)) return;
-      lookupCityForCoords(loc.lat, loc.lon).then(city => {
-        if (token === latestGpsCityToken) renderGpsMetric(sample, city);
+      lookupCityForCoords(loc.lat, loc.lon).then(place => {
+        if (token === latestGpsCityToken) {
+          sample.place_info = place;
+          renderGpsMetric(sample, place);
+          if (latestSample?.sequence === sample.sequence) addSample(sample);
+        }
       });
     }
 
@@ -1976,7 +2252,7 @@ def page_html():
       el.style.top = `${Math.max(margin, top)}px`;
     }
 
-    function showSampleTooltip(sample, ev, cityText = '') {
+    function showSampleTooltip(sample, ev, place = null) {
       if (!sample) return;
       const summary = sample.latency_summary || {};
       const loc = sample.location || {};
@@ -1985,7 +2261,10 @@ def page_html():
       const pinHint = (!Number.isFinite(loc.lat) || !Number.isFinite(loc.lon))
         ? '<div><strong>Pin:</strong> double-click this sample, then click the map</div>'
         : '';
-      const cityRow = cityText ? `<div><strong>City:</strong> ${esc(cityText)}</div>` : '';
+      const label = typeof place === 'string' ? place : (place?.label || '');
+      const poi = typeof place === 'object' ? place.poi : '';
+      const cityRow = label ? `<div><strong>Place:</strong> ${esc(label)}</div>` : '';
+      const poiRow = poi ? `<div><strong>POI:</strong> ${esc(poi)}</div>` : '';
       const el = tooltipEl();
       el.innerHTML = `
         <div><strong>Sample #${esc(sample.sequence)}</strong></div>
@@ -1994,6 +2273,7 @@ def page_html():
         <div><strong>GPS:</strong> ${esc(formatGpsForSample(sample))}</div>
         <div><strong>Source:</strong> ${esc(source)}</div>
         ${cityRow}
+        ${poiRow}
         ${pinHint}
       `;
       el.style.display = 'block';
@@ -2644,6 +2924,13 @@ def page_html():
       return latestLatLng;
     }
 
+    function accessPointName(sample) {
+      const router = sample?.router_geo || {};
+      const firstHop = router.first_hop || {};
+      const name = router.access_point_name || firstHop.host || (firstHop.ips || [])[0] || '';
+      return name && name !== '*' ? name : 'waiting for traceroute hop 1';
+    }
+
     async function clientLog(level, source, message, detail) {
       try {
         await fetch('/api/client-log', {
@@ -2748,6 +3035,72 @@ def page_html():
       }
     }
 
+    function formatBytes(bytes) {
+      const value = Number(bytes || 0);
+      if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(2)} GB`;
+      if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(1)} MB`;
+      if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
+      return `${value} B`;
+    }
+
+    function countryFromOsmName(name) {
+      return String(name || '').replace(/-latest\.osm\.pbf$/i, '');
+    }
+
+    function renderOsmStatus(data) {
+      const info = document.getElementById('osmStorageInfo');
+      const path = document.getElementById('osmStoragePath');
+      const list = document.getElementById('osmFileList');
+      const files = data.files || [];
+      const downloads = Object.values(data.downloads || {});
+      info.textContent = `OSM data: ${formatBytes(data.total_bytes)} across ${files.length} downloaded country file${files.length === 1 ? '' : 's'}.`;
+      path.textContent = `Directory: ${data.directory || ''}`;
+      const rows = [];
+      for (const item of downloads.sort((a, b) => String(a.country).localeCompare(String(b.country)))) {
+        const pct = Number.isFinite(item.percent) ? item.percent : 0;
+        const total = item.total_bytes ? ` / ${formatBytes(item.total_bytes)}` : '';
+        rows.push(`
+          <div class="osm-file-item">
+            <div class="osm-file-name">${esc(item.country || countryFromOsmName(item.path))} · ${esc(item.status || '')} · ${formatBytes(item.bytes)}${total}</div>
+            <progress max="100" value="${esc(pct)}"></progress>
+            <div class="osm-path">${esc(item.path || '')}</div>
+          </div>
+        `);
+      }
+      for (const file of files) {
+        const country = countryFromOsmName(file.name);
+        if (downloads.some(d => d.country === country)) continue;
+        rows.push(`
+          <div class="osm-file-item">
+            <div class="osm-file-name">${esc(country)} · downloaded · ${formatBytes(file.bytes)}</div>
+            <progress max="100" value="100"></progress>
+            <div class="osm-path">${esc(file.path)}</div>
+          </div>
+        `);
+      }
+      list.innerHTML = rows.join('') || '<div class="osm-status">No OSM country extracts downloaded yet.</div>';
+    }
+
+    async function refreshOsmStatus() {
+      const res = await fetch('/api/osm-status');
+      const data = await res.json();
+      renderOsmStatus(data);
+      return data;
+    }
+
+    async function runOsmConsistencyCheck() {
+      const out = document.getElementById('osmConsistencyReport');
+      out.textContent = 'Checking Redis GPS samples against downloaded OSM countries...';
+      try {
+        const res = await fetch('/api/osm-consistency');
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.error || 'consistency check failed');
+        out.textContent = data.report || JSON.stringify(data, null, 2);
+      } catch (err) {
+        out.textContent = `OSM consistency check failed: ${err.message}`;
+      }
+    }
+
     async function downloadOsmCountry() {
       const country = document.getElementById('osmCountry').value.trim();
       const status = document.getElementById('osmDownloadStatus');
@@ -2765,6 +3118,7 @@ def page_html():
         const data = await res.json();
         if (!data.ok) throw new Error(data.error || 'download failed');
         status.textContent = `Downloading ${data.country} to ${data.path}`;
+        await refreshOsmStatus();
       } catch (err) {
         status.textContent = `OSM download failed: ${err.message}`;
       }
@@ -2847,6 +3201,7 @@ def page_html():
       const wifi = sample.wifi || {};
       const connectionErrors = sample.connection_errors || {};
       const dnsServers = sample.dns_servers || [];
+      const placeInfo = sample.place_info || {};
       const locationSource = loc.source || (loc.interpolated ? 'interpolated' : 'unknown');
       const rawLoc = sample.raw_location || {};
       if (!plottedSamples.some(s => s.sequence === sample.sequence)) {
@@ -2858,9 +3213,8 @@ def page_html():
       }
       document.getElementById('avg').textContent = summary.avg_ms ? `${summary.avg_ms} ms` : '--';
       document.getElementById('speed').textContent = Number.isFinite(motion.speed_kmh) ? `${motion.speed_kmh} km/h` : '--';
-      document.getElementById('wifi').textContent = wifi.ssid && wifi.ssid !== 'unknown' ? wifi.ssid : (wifi.mac_address || '--');
+      document.getElementById('wifi').textContent = accessPointName(sample);
       updateLatestGpsMetric(sample);
-      document.getElementById('cell').textContent = radio.nr_pci ? `NR ${radio.nr_pci}` : (radio.lte_pci ? `LTE ${radio.lte_pci}` : 'unknown');
       document.getElementById('details').innerHTML = `<strong>Latest sample</strong>` + propGrid([
         ['Time', sample.timestamp_utc],
         ['Latency min/avg/max', `${summary.min_ms} / ${summary.avg_ms} / ${summary.max_ms} ms`],
@@ -2868,6 +3222,9 @@ def page_html():
         ['DNS name servers', dnsServers.join(', ')],
         ['Speed / distance', `${motion.speed_kmh ?? ''} km/h / ${motion.distance_from_previous_km ?? ''} km`],
         ['Location source', locationSource],
+        ['Place', placeInfo.label || 'pending reverse geocode'],
+        ['POI', placeInfo.poi || 'none detected'],
+        ['POI type/category', [placeInfo.rawType, placeInfo.category].filter(Boolean).join(' / ') || 'n/a'],
         ['Selected correction track', sample.position_correction?.track_name || loc.track_name || sample.settings?.selected_track_id || 'n/a'],
         ['Route inference', sample.position_correction?.track_inference ? JSON.stringify(sample.position_correction.track_inference) : 'n/a'],
         ['Raw GPS', rawLoc.lat ? `${rawLoc.lat}, ${rawLoc.lon}` : 'none'],
@@ -2875,6 +3232,8 @@ def page_html():
         ['Correction method', sample.position_correction?.method || ''],
         ['Correction status', sample.position_correction?.rejected ? `rejected: ${sample.position_correction?.reason || ''}` : (sample.position_correction?.applied ? 'applied' : 'not applied')],
         ['Accelerometer', sample.motion_sensor ? JSON.stringify(sample.motion_sensor.acceleration || sample.motion_sensor.acceleration_including_gravity || {}) : 'not available'],
+        ['Access point name', accessPointName(sample)],
+        ['Access point source', 'traceroute hop 1'],
         ['Wi-Fi SSID / MAC / IP', `${wifi.ssid} / ${wifi.mac_address} / ${wifi.ip_address}`],
         ['Wi-Fi RSSI / noise / SNR', wifi.rssi_dbm != null ? `${wifi.rssi_dbm} dBm / ${wifi.noise_dbm ?? 'n/a'} dBm / ${wifi.snr_db ?? 'n/a'} dB` : (wifi.rssi_status || wifi.wifi_metrics_error || 'not available')],
         ['Wi-Fi PHY / channel / Tx rate', `${wifi.phy_mode || 'n/a'} / ${wifi.channel || 'n/a'} / ${wifi.tx_rate_mbps != null ? `${wifi.tx_rate_mbps} Mbps` : 'n/a'}`],
@@ -3000,6 +3359,7 @@ def page_html():
       document.getElementById('redisQueryText').value = redisQueryForPreset(ev.target.value);
     });
     document.getElementById('downloadOsmCountry').addEventListener('click', downloadOsmCountry);
+    document.getElementById('checkOsmConsistency').addEventListener('click', runOsmConsistencyCheck);
 
     const events = new EventSource('/events');
     events.onopen = () => document.getElementById('status').textContent = 'Live sampler connected.';
@@ -3049,11 +3409,27 @@ def page_html():
     document.getElementById('openSettings').addEventListener('click', async () => {
       const settings = await loadSettings();
       fillSettingsForm(settings);
+      await refreshOsmStatus().catch(err => {
+        document.getElementById('osmStorageInfo').textContent = `OSM status failed: ${err.message}`;
+      });
+      if (!osmStatusTimer) osmStatusTimer = window.setInterval(() => refreshOsmStatus().catch(() => {}), 1500);
       settingsModal.classList.add('open');
     });
-    document.getElementById('closeSettings').addEventListener('click', () => settingsModal.classList.remove('open'));
+    document.getElementById('closeSettings').addEventListener('click', () => {
+      settingsModal.classList.remove('open');
+      if (osmStatusTimer) {
+        window.clearInterval(osmStatusTimer);
+        osmStatusTimer = null;
+      }
+    });
     settingsModal.addEventListener('click', ev => {
-      if (ev.target === settingsModal) settingsModal.classList.remove('open');
+      if (ev.target === settingsModal) {
+        settingsModal.classList.remove('open');
+        if (osmStatusTimer) {
+          window.clearInterval(osmStatusTimer);
+          osmStatusTimer = null;
+        }
+      }
     });
     document.getElementById('saveSettings').addEventListener('click', async () => {
       const settings = settingsFromForm();
@@ -3122,6 +3498,21 @@ def page_html():
       });
       const data = await res.json();
       document.getElementById('status').textContent = data.ok ? `Wi-Fi name saved: ${data.ssid}` : `Wi-Fi name failed: ${data.error}`;
+    });
+    document.getElementById('detectMacWifi').addEventListener('click', async () => {
+      try {
+        const res = await fetch('/api/wifi-info');
+        const data = await res.json();
+        const wifi = data.wifi || {};
+        if (wifi.ssid && wifi.ssid !== 'unknown' && !/^<redacted>$/i.test(wifi.ssid)) {
+          document.getElementById('wifiLabel').value = wifi.ssid;
+          document.getElementById('status').textContent = `Mac Wi-Fi detected: ${wifi.ssid}. Click Save Wi-Fi name to use it as override.`;
+        } else {
+          document.getElementById('status').textContent = wifi.ssid_probe_error || wifi.wifi_metrics_error || 'Mac Wi-Fi SSID is unavailable or redacted by macOS Location Services.';
+        }
+      } catch (err) {
+        document.getElementById('status').textContent = `Mac Wi-Fi detection failed: ${err.message}`;
+      }
     });
     document.getElementById('startBrowserGps').addEventListener('click', () => {
       const button = document.getElementById('startBrowserGps');
@@ -3259,6 +3650,7 @@ class Handler(BaseHTTPRequestHandler):
             with STATE_LOCK:
                 status = dict(STATE["status"])
                 status["redis"] = STATE["redis"]
+                status["collection_enabled"] = STATE.get("collection_enabled", True)
                 payload = {
                     "samples": STATE["samples"],
                     "status": status,
@@ -3282,10 +3674,22 @@ class Handler(BaseHTTPRequestHandler):
             payload = {"ok": out["ok"], "adb": adb, "selected": selected, "devices": devices, "stderr": out["stderr"]}
             self.send_bytes(json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
             return
+        if parsed.path == "/api/wifi-info":
+            payload = {"ok": True, "wifi": local_wifi_info()}
+            self.send_bytes(json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+            return
         if parsed.path == "/api/logs":
             with STATE_LOCK:
                 payload = {"logs": STATE["error_logs"][-300:]}
             self.send_bytes(json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/osm-status":
+            self.send_bytes(json.dumps(osm_storage_status(), ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+            return
+        if parsed.path == "/api/osm-consistency":
+            with STATE_LOCK:
+                config = dict(STATE.get("config") or {})
+            self.send_bytes(json.dumps(osm_consistency_check(config), ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
             return
         if parsed.path == "/export.kml":
             with STATE_LOCK:
@@ -3430,6 +3834,21 @@ class Handler(BaseHTTPRequestHandler):
                 payload.get("detail"),
             )
             self.send_bytes(json.dumps({"ok": True, "log": entry}).encode("utf-8"), "application/json; charset=utf-8")
+            return
+
+        if parsed.path == "/api/collection-control":
+            action = str(payload.get("action", "")).strip().lower()
+            if action not in {"start", "stop"}:
+                self.send_bytes(b'{"ok":false,"error":"action must be start or stop"}', "application/json; charset=utf-8", status=400)
+                return
+            enabled = action == "start"
+            with STATE_LOCK:
+                STATE["collection_enabled"] = enabled
+                status = dict(STATE.get("status") or {})
+                status["collection_enabled"] = enabled
+                STATE["status"] = status
+            add_log("info", "collection", f"Collection {'started' if enabled else 'stopped'} from dashboard")
+            self.send_bytes(json.dumps({"ok": True, "collection_enabled": enabled}).encode("utf-8"), "application/json; charset=utf-8")
             return
 
         if parsed.path == "/api/redis-log-query":
