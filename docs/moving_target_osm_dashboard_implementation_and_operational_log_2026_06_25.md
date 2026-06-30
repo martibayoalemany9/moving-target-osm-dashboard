@@ -1,4 +1,4 @@
-# Realtime OpenStreetMap ICE 5G Latency Dashboard Implementation and Operational Log
+# Realtime OpenStreetMap Moving Target 5G Latency Dashboard Implementation and Operational Log
 
 Date: 2026-06-25  
 Timezone during execution: Europe/Berlin  
@@ -6,7 +6,7 @@ Workspace: `/Users/username/curriculum_2026/69de423717afa15e22861207`
 
 ## Objective
 
-Build and run a realtime map in the Codex environment for measuring Internet latency while traveling on an ICE train, correlated with:
+Build and run a realtime map in the Codex environment for measuring Internet latency while traveling on an moving target, correlated with:
 
 - OpenStreetMap map display.
 - Timestamped latency measurements.
@@ -18,7 +18,7 @@ The dashboard was designed to avoid aggressive network fingerprinting. It uses n
 
 ## Files Created or Modified
 
-### `realtime_ice_5g_osm_map_app.py`
+### `moving_target_osm_dashboard.py`
 
 Self-contained realtime web app and sampler.
 
@@ -31,7 +31,7 @@ Responsibilities:
 - Writes every sample to JSONL for later analysis.
 - Exposes JSON and Server-Sent Events endpoints for live updates.
 
-### `ice_5g_latency_mapper.py`
+### `moving_client_data.py`
 
 Earlier offline collector and renderer.
 
@@ -44,7 +44,7 @@ Responsibilities:
 
 Setup and interpretation guide for ADB, Samsung developer settings, radio fields, and optimization.
 
-### `realtime_openstreetmap_ice_5g_latency_dashboard_implementation_and_operational_log_2026_06_25.md`
+### `realtime_openstreetmap_moving_client_data_dashboard_implementation_and_operational_log_2026_06_25.md`
 
 This document.
 
@@ -59,7 +59,7 @@ http://127.0.0.1:8766/
 The active sample log is:
 
 ```text
-realtime_ice_5g_osm_samples_20260625T193110Z.jsonl
+moving_target_osm_samples_20260625T193110Z.jsonl
 ```
 
 Port `8765` was attempted first but was already occupied:
@@ -71,8 +71,8 @@ OSError: [Errno 48] Address already in use
 The server was then started successfully on port `8766`:
 
 ```text
-Realtime ICE 5G OSM map running at http://127.0.0.1:8766/
-Sample log: realtime_ice_5g_osm_samples_20260625T193110Z.jsonl
+Moving Target OSM Dashboard running at http://127.0.0.1:8766/
+Sample log: moving_target_osm_samples_20260625T193110Z.jsonl
 Press Ctrl-C to stop.
 ```
 
@@ -142,7 +142,7 @@ Result included:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Realtime ICE 5G Latency Map</title>
+  <title>Moving Target OSM Dashboard</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 ```
 
@@ -397,7 +397,7 @@ To turn these into physical antenna locations, the data must be joined with an e
 
 ## Why HTTPS Timing Instead of Ping/Traceroute
 
-The previous in-flight router appeared to suppress ICMP/traceroute during one probe. For this ICE setup, the dashboard avoids aggressive fingerprinting:
+The previous in-flight router appeared to suppress ICMP/traceroute during one probe. For this moving target setup, the dashboard avoids aggressive fingerprinting:
 
 - No port scanning.
 - No subnet scanning.
@@ -418,7 +418,7 @@ https://www.google.com/generate_204
 You can make it even lighter by using one target:
 
 ```bash
-./realtime_ice_5g_osm_map_app.py --port 8766 --interval 15 --target https://cloudflare.com/cdn-cgi/trace
+./moving_target_osm_dashboard.py --port 8766 --interval 15 --target https://cloudflare.com/cdn-cgi/trace
 ```
 
 ## Running the Dashboard
@@ -426,29 +426,29 @@ You can make it even lighter by using one target:
 Current command:
 
 ```bash
-./realtime_ice_5g_osm_map_app.py --port 8766 --interval 10
+./moving_target_osm_dashboard.py --port 8766 --interval 10
 ```
 
 Recommended once ADB is installed:
 
 ```bash
-./realtime_ice_5g_osm_map_app.py --port 8766 --interval 15
+./moving_target_osm_dashboard.py --port 8766 --interval 15
 ```
 
 If more than one Android device is attached:
 
 ```bash
 adb devices -l
-./realtime_ice_5g_osm_map_app.py --port 8766 --interval 15 --serial YOUR_DEVICE_SERIAL
+./moving_target_osm_dashboard.py --port 8766 --interval 15 --serial YOUR_DEVICE_SERIAL
 ```
 
 If port `8766` is occupied:
 
 ```bash
-./realtime_ice_5g_osm_map_app.py --port 8767 --interval 15
+./moving_target_osm_dashboard.py --port 8767 --interval 15
 ```
 
-## How to Optimize the 5G Connection at ICE Speeds
+## How to Optimize the 5G Connection at Moving Speeds
 
 At around 200 km/h, the device is constantly crossing cell boundaries. The main optimization goal is stable handover, not maximum theoretical throughput.
 
@@ -471,7 +471,7 @@ Not recommended:
 - Locking to one cell while moving fast.
 - Forcing a single 5G band without route-specific deployment knowledge.
 
-Likely causes of ICE latency spikes:
+Likely causes of moving latency spikes:
 
 - 5G/LTE handover between trackside macro cells.
 - NSA 5G anchor changes between LTE cells.
@@ -488,7 +488,7 @@ Likely causes of ICE latency spikes:
 Command:
 
 ```bash
-python3 -m py_compile realtime_ice_5g_osm_map_app.py ice_5g_latency_mapper.py
+python3 -m py_compile moving_target_osm_dashboard.py moving_client_data.py
 ```
 
 Result:
@@ -530,13 +530,13 @@ JSON returned successfully with live samples and ADB status.
 Command:
 
 ```bash
-ls -lt realtime_ice_5g_osm_samples_*.jsonl | head -n 5
+ls -lt moving_target_osm_samples_*.jsonl | head -n 5
 ```
 
 Result:
 
 ```text
-realtime_ice_5g_osm_samples_20260625T193110Z.jsonl
+moving_target_osm_samples_20260625T193110Z.jsonl
 ```
 
 ## Current Gaps
@@ -603,18 +603,18 @@ redis-data/appendonlydir/
 Telemetry keys use prefix:
 
 ```text
-ice5g
+moving_client_data
 ```
 
 Redis stores:
 
 ```text
-ice5g:latest       latest full JSON sample
-ice5g:samples      list of full JSON samples
-ice5g:stream       Redis stream of samples
-ice5g:sample:N     full JSON for sequence N
-ice5g:index:N      hash index for sequence N
-ice5g:geo          geospatial index when GPS exists
+moving_client_data:latest       latest full JSON sample
+moving_client_data:samples      list of full JSON samples
+moving_client_data:stream       Redis stream of samples
+moving_client_data:sample:N     full JSON for sequence N
+moving_client_data:index:N      hash index for sequence N
+moving_client_data:geo          geospatial index when GPS exists
 ```
 
 Verification:

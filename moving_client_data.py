@@ -173,7 +173,7 @@ def parse_radio(registry, telephony, props):
 def collect(args):
     adb = args.adb or shutil.which("adb")
     targets = args.target or DEFAULT_TARGETS
-    out_path = Path(args.out or f"ice_5g_latency_samples_{dt.datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}.jsonl")
+    out_path = Path(args.out or f"moving_client_data_samples_{dt.datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}.jsonl")
 
     adb_status = {"available": bool(adb), "path": adb}
     serial = args.serial
@@ -320,7 +320,7 @@ def render(args):
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ICE 5G Latency Map</title>
+  <title>Moving Client Data Map</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <style>
     html, body, #map {{ height: 100%; margin: 0; }}
@@ -336,7 +336,7 @@ def render(args):
 <body>
   <div id="map"></div>
   <div class="panel">
-    <strong>ICE 5G Latency Map</strong><br>
+    <strong>Moving Client Data Map</strong><br>
     Samples: {len(samples)} | Geolocated points: {len(points)}<br>
     Source: {html.escape(str(in_path))}
     <div class="legend">
@@ -382,7 +382,7 @@ def render(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Low-rate ICE 5G latency, GPS, and radio mapper.")
+    parser = argparse.ArgumentParser(description="Low-rate moving 5G latency, GPS, and radio mapper.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_collect = sub.add_parser("collect", help="Collect low-rate samples to JSONL.")

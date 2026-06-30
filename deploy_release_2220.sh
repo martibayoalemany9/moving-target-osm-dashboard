@@ -5,8 +5,8 @@ PORT="${PORT:-8766}"
 TARGET_TIME="${TARGET_TIME:-22:20}"
 ADB_PATH="${ADB_PATH:-/Users/username/Library/Android/sdk/platform-tools/adb}"
 REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/0}"
-REDIS_PREFIX="${REDIS_PREFIX:-ice5g}"
-APP="./realtime_ice_5g_osm_map_app.py"
+REDIS_PREFIX="${REDIS_PREFIX:-moving_client_data}"
+APP="./moving_target_osm_dashboard.py"
 
 now_epoch="$(date +%s)"
 target_epoch="$(date -j -f '%Y-%m-%d %H:%M' "$(date '+%Y-%m-%d') ${TARGET_TIME}" +%s)"
@@ -21,7 +21,7 @@ if [ "$sleep_for" -gt 0 ]; then
 fi
 
 echo "Stopping existing dashboard on port ${PORT}"
-pkill -f "realtime_ice_5g_osm_map_app.py --port ${PORT}" 2>/dev/null || true
+pkill -f "moving_target_osm_dashboard.py --port ${PORT}" 2>/dev/null || true
 sleep 1
 
 echo "Starting release dashboard"

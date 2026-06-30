@@ -7,9 +7,9 @@ venv/
 *.log
 *.tmp
 
-realtime_ice_5g_osm_samples_*.jsonl
-ice_5g_latency_samples_*.jsonl
-ice_5g_latency_samples_*.html
+moving_target_osm_samples_*.jsonl
+moving_client_data_samples_*.jsonl
+moving_client_data_samples_*.html
 satellite_probe_*.txt
 
 tools/osm_extracts/

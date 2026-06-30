@@ -1,21 +1,21 @@
-# ICE Train 5G Latency, GPS, Cell Mapping, and Connection Optimization Notes
+# Moving Target 5G Latency, GPS, Cell Mapping, and Connection Optimization Notes
 
 Date: 2026-06-25  
-Use case: measure Internet latency along an ICE route and correlate it with Samsung GPS plus 5G/LTE radio properties over ADB.
+Use case: measure Internet latency along a moving route and correlate it with Samsung GPS plus 5G/LTE radio properties over ADB.
 
 ## What Was Added
 
 File:
 
 ```text
-ice_5g_latency_mapper.py
+moving_client_data.py
 ```
 
 It has two modes:
 
 ```bash
-./ice_5g_latency_mapper.py collect
-./ice_5g_latency_mapper.py render samples.jsonl
+./moving_client_data.py collect
+./moving_client_data.py render samples.jsonl
 ```
 
 The collector is intentionally low-rate. It does not scan ports, enumerate hosts, or hammer the network. Each sample records:
@@ -92,7 +92,7 @@ If it says `unauthorized`, unlock the Samsung and approve the USB debugging prom
 Recommended low-aggression run on a train:
 
 ```bash
-./ice_5g_latency_mapper.py collect --interval 15 --samples 240
+./moving_client_data.py collect --interval 15 --samples 240
 ```
 
 That records one sample every 15 seconds for about one hour.
@@ -100,20 +100,20 @@ That records one sample every 15 seconds for about one hour.
 For a shorter test:
 
 ```bash
-./ice_5g_latency_mapper.py collect --interval 20 --samples 10
+./moving_client_data.py collect --interval 20 --samples 10
 ```
 
 If multiple Android devices are attached:
 
 ```bash
 adb devices -l
-./ice_5g_latency_mapper.py collect --serial YOUR_DEVICE_SERIAL --interval 15
+./moving_client_data.py collect --serial YOUR_DEVICE_SERIAL --interval 15
 ```
 
 Output will look like:
 
 ```text
-Writing samples to ice_5g_latency_samples_20260625T181500Z.jsonl
+Writing samples to moving_client_data_samples_20260625T181500Z.jsonl
 2026-06-25T18:15:00+00:00 seq=1 lat=52.5201 lon=13.4051 avg_ms=83.4 nr_pci=123 nr_arfcn=634080 lte_pci=...
 ```
 
@@ -124,13 +124,13 @@ Stop a continuous run with `Ctrl-C`.
 After collecting:
 
 ```bash
-./ice_5g_latency_mapper.py render ice_5g_latency_samples_YYYYMMDDTHHMMSSZ.jsonl
+./moving_client_data.py render moving_client_data_samples_YYYYMMDDTHHMMSSZ.jsonl
 ```
 
 This writes:
 
 ```text
-ice_5g_latency_samples_YYYYMMDDTHHMMSSZ.html
+moving_client_data_samples_YYYYMMDDTHHMMSSZ.html
 ```
 
 Open the HTML file in a browser. It uses OpenStreetMap tiles and Leaflet from a CDN, so the map background needs Internet access. The raw points are embedded in the file.
@@ -184,7 +184,7 @@ Things that usually do not help:
 - Repeated traceroute or ping floods.
 - Changing APN settings unless the operator explicitly documents a better APN.
 
-Best hypothesis for ICE at 200 km/h:
+Best hypothesis for a moving target around 200 km/h:
 
 The phone is frequently handing over between trackside macro cells and possibly switching between 5G NSA, LTE anchor cells, and LTE fallback. Latency problems are often caused by handover timing, signal blockage inside the train, congestion on train-filled cells, or a VPN/tunnel reestablishing after the radio path changes.
 
@@ -203,10 +203,10 @@ https://www.google.com/generate_204
 You can choose a single stable target:
 
 ```bash
-./ice_5g_latency_mapper.py collect --target https://cloudflare.com/cdn-cgi/trace --interval 15
+./moving_client_data.py collect --target https://cloudflare.com/cdn-cgi/trace --interval 15
 ```
 
 ## Files
 
-- `ice_5g_latency_mapper.py`: collector and map renderer.
+- `moving_client_data.py`: collector and map renderer.
 - `ice_train_5g_latency_gps_cell_tower_mapping_and_connection_optimization_notes_2026_06_25.md`: this guide.

@@ -1,10 +1,10 @@
-# Realtime ICE 5G OSM Latency Mapping Feature Change History And Operational Notes
+# Realtime Moving Target 5G OSM Latency Mapping Feature Change History And Operational Notes
 
 Date: 2026-06-29
 
 ## Current Prototype
 
-The local app is `realtime_ice_5g_osm_map_app.py`. It serves a browser dashboard with OpenStreetMap tiles, live latency samples, GPS positions, route coloring by latency, a dual-axis latency/speed plot, Redis-backed sample storage, and KML export.
+The local app is `moving_target_osm_dashboard.py`. It serves a browser dashboard with OpenStreetMap tiles, live latency samples, GPS positions, route coloring by latency, a dual-axis latency/speed plot, Redis-backed sample storage, and KML export.
 
 Default route target for router path sampling is now `google.com`, so traceroute/provider detection follows the requested "traceroute to Google" behavior. The app stores `measurement_day` on every sample and includes it in Redis indexes and KML exports.
 
@@ -100,8 +100,8 @@ The workspace is already a Git repository. `.gitignore` excludes runtime logs, P
 No commit has been created automatically. The recommended first commit is:
 
 ```sh
-git add realtime_ice_5g_osm_map_app.py .gitignore realtime_ice_5g_osm_latency_mapping_feature_change_history_and_operational_notes_2026_06_29.md
-git commit -m "Add realtime ICE 5G latency mapping dashboard"
+git add moving_target_osm_dashboard.py .gitignore moving_target_osm_dashboard_feature_change_history_and_operational_notes_2026_06_29.md
+git commit -m "Add realtime Moving Target 5G latency mapping dashboard"
 ```
 
 GitHub authentication was previously observed for user `martibayoalemany9`; pushing still requires choosing or creating a target repository.

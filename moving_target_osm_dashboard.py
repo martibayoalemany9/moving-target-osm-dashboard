@@ -237,7 +237,7 @@ def add_log(level, source, message, detail=None):
     if config.get("redis_url"):
         try:
             redis_client = RedisClient(config["redis_url"])
-            redis_client.store_log(config.get("redis_prefix") or "ice5g", entry)
+            redis_client.store_log(config.get("redis_prefix") or "moving_client_data", entry)
         except Exception:
             pass
     return entry
@@ -1135,7 +1135,7 @@ def redis_status(redis_client):
         return {"enabled": True, "ok": False, "message": str(exc), "url": f"redis://{redis_client.host}:{redis_client.port}/{redis_client.db}"}
 
 
-def append_sample(sample, log_path, redis_client=None, redis_prefix="ice5g"):
+def append_sample(sample, log_path, redis_client=None, redis_prefix="moving_client_data"):
     enrich_motion(sample)
     with STATE_LOCK:
         max_seq = max([s.get("sequence") or 0 for s in STATE["samples"]] or [0])
@@ -1245,7 +1245,7 @@ def execute_redis_log_query(config, query):
     if not redis_url:
         return {"ok": False, "error": "Redis is not configured"}
     redis_client = RedisClient(redis_url)
-    redis_prefix = config.get("redis_prefix") or "ice5g"
+    redis_prefix = config.get("redis_prefix") or "moving_client_data"
     logs = redis_client.load_logs(redis_prefix, count=1000)
     start, end = parse_query_time_range(query)
     text = (query or "").lower()
@@ -1369,7 +1369,7 @@ def samples_to_kml(samples):
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Document>
-    <name>ICE 5G latency samples</name>
+    <name>Moving Target latency samples</name>
     <Style id="exportedRoute"><LineStyle><color>ff7d5de5</color><width>4</width></LineStyle></Style>
     <Style id="rawRoute"><LineStyle><color>ff00aaff</color><width>2</width></LineStyle></Style>
     <Placemark>
@@ -1391,7 +1391,7 @@ def samples_to_kml(samples):
 def collector_loop(config):
     log_path = Path(config["log"])
     redis_client = RedisClient(config["redis_url"]) if config.get("redis_url") else None
-    redis_prefix = config.get("redis_prefix") or "ice5g"
+    redis_prefix = config.get("redis_prefix") or "moving_client_data"
     restore_info = restore_from_redis(redis_client, redis_prefix)
     adb, serial, adb_status = choose_adb(config.get("adb"), config.get("serial"))
     with STATE_LOCK:
@@ -1429,7 +1429,7 @@ def page_html():
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Realtime ICE 5G Latency Map</title>
+  <title>Moving Target OSM Dashboard</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <style>
     html, body, #map { height: 100%; margin: 0; }
@@ -1612,7 +1612,7 @@ def page_html():
   <div class="topbar">
     <div class="panel" id="summaryPanel">
       <div class="panel-title">
-        <h1>Realtime ICE 5G Latency Map</h1>
+        <h1>Moving Target OSM Dashboard</h1>
         <button class="collapseBtn" data-target="summaryPanel" type="button">Collapse</button>
       </div>
       <div class="collapsible-body">
@@ -1781,7 +1781,7 @@ def page_html():
         <code>Latency</code><div>Measured HTTPS transaction time from the laptop. Spikes can come from handovers, DNS, TLS setup, congestion, VPNs, or server path changes.</div>
       </div>
       <div class="modal-note">
-        There is no safe generic "5G improvement slider" exposed by Android or Samsung developer options. Practical tuning is physical placement, USB tethering, disabling VPN during diagnosis, using 5G Auto instead of forced NR-only, and avoiding band locks while moving at ICE speeds.
+        There is no safe generic "5G improvement slider" exposed by Android or Samsung developer options. Practical tuning is physical placement, USB tethering, disabling VPN during diagnosis, using 5G Auto instead of forced NR-only, and avoiding band locks while moving at moving speeds.
       </div>
       <div class="actions">
         <button id="closeHelp" type="button">Close</button>
@@ -3293,7 +3293,7 @@ class Handler(BaseHTTPRequestHandler):
             body = samples_to_kml(samples).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/vnd.google-earth.kml+xml; charset=utf-8")
-            self.send_header("Content-Disposition", 'attachment; filename="ice_5g_latency_samples.kml"')
+            self.send_header("Content-Disposition", 'attachment; filename="moving_client_data_samples.kml"')
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -3349,7 +3349,7 @@ class Handler(BaseHTTPRequestHandler):
             if config.get("redis_url"):
                 try:
                     redis_client = RedisClient(config["redis_url"])
-                    redis_prefix = config.get("redis_prefix") or "ice5g"
+                    redis_prefix = config.get("redis_prefix") or "moving_client_data"
                     redis_client.store_browser_location(redis_prefix, loc)
                     redis_result = {"enabled": True, "ok": True, "message": "browser GPS stored", "prefix": redis_prefix}
                 except Exception as exc:
@@ -3402,7 +3402,7 @@ class Handler(BaseHTTPRequestHandler):
             if config.get("redis_url"):
                 try:
                     redis_client = RedisClient(config["redis_url"])
-                    redis_prefix = config.get("redis_prefix") or "ice5g"
+                    redis_prefix = config.get("redis_prefix") or "moving_client_data"
                     redis_client.store_sample(redis_prefix, sample)
                     redis_result = {"enabled": True, "ok": True, "message": "manual sample location stored", "prefix": redis_prefix}
                 except Exception as exc:
@@ -3512,7 +3512,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Realtime ICE 5G latency map using OpenStreetMap tiles.")
+    parser = argparse.ArgumentParser(description="Realtime moving target latency map using OpenStreetMap tiles.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--interval", type=float, default=15.0)
@@ -3522,11 +3522,11 @@ def main():
     parser.add_argument("--adb", default=None)
     parser.add_argument("--serial", default=None)
     parser.add_argument("--redis-url", default=None, help="Optional Redis URL, for example redis://127.0.0.1:6379/0")
-    parser.add_argument("--redis-prefix", default="ice5g", help="Redis key prefix for samples, streams, indexes, and geo data.")
+    parser.add_argument("--redis-prefix", default="moving_client_data", help="Redis key prefix for samples, streams, indexes, and geo data.")
     parser.add_argument("--trace-interval", type=float, default=60.0, help="Seconds between short traceroute samples for router GeoIP. Use 0 to disable.")
     parser.add_argument("--trace-target", default=TRACE_TARGET, help="Traceroute target for router GeoIP sampling.")
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    parser.add_argument("--log", default=f"realtime_ice_5g_osm_samples_{stamp}.jsonl")
+    parser.add_argument("--log", default=f"moving_target_osm_samples_{stamp}.jsonl")
     args = parser.parse_args()
 
     config = {
@@ -3550,7 +3550,7 @@ def main():
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     url = f"http://{args.host}:{args.port}/"
-    print(f"Realtime ICE 5G OSM map running at {url}")
+    print(f"Moving Target OSM Dashboard running at {url}")
     print(f"Sample log: {args.log}")
     if args.redis_url:
         print(f"Redis storage: {args.redis_url} prefix={args.redis_prefix}")
