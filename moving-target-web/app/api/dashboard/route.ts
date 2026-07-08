@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { auth } from "../../../auth";
+import { auth, isAuthRequired } from "../../../auth";
 
 const mockPayload = {
   samples: [
@@ -23,8 +23,10 @@ const mockPayload = {
 };
 
 export async function GET() {
-  const session = await auth();
-  if (!session?.user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  if (isAuthRequired()) {
+    const session = await auth();
+    if (!session?.user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  }
 
   const upstream = process.env.MOVING_TARGET_API_URL;
   if (!upstream) return NextResponse.json(mockPayload);

@@ -10,10 +10,15 @@ export function isGoogleAuthConfigured() {
   return Boolean(id && secret && id !== GOOGLE_ID_PLACEHOLDER && secret !== GOOGLE_SECRET_PLACEHOLDER);
 }
 
+export function isAuthRequired() {
+  return process.env.AUTH_REQUIRED === "true";
+}
+
 export const { handlers, auth, signIn, signOut } = NextAuth({
   providers: isGoogleAuthConfigured() ? [Google] : [],
   callbacks: {
     authorized({ auth: session }) {
+      if (!isAuthRequired()) return true;
       if (!isGoogleAuthConfigured()) return true;
       return Boolean(session?.user);
     },

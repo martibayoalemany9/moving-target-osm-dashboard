@@ -13,10 +13,23 @@ bridge API, Redis-compatible cloud store, or periodic upload from the Python app
 ```bash
 cp .env.example .env.local
 npm install
-npm run dev
+npm run dev:public
 ```
 
-Open `http://localhost:3000`.
+Open `http://127.0.0.1:3000`.
+
+There are two local modes:
+
+```bash
+npm run dev:public
+npm run dev:auth
+```
+
+- Public/no-auth dashboard: `http://127.0.0.1:3000`
+- Google-auth dashboard: `http://127.0.0.1:3001`
+
+The public port sets `AUTH_REQUIRED=false` and never calls Google OAuth. The
+auth port sets `AUTH_REQUIRED=true` and requires real Google OAuth credentials.
 
 ## Google Authentication
 
@@ -26,17 +39,30 @@ Open `http://localhost:3000`.
 4. Add authorized redirect URI:
 
 ```text
-http://localhost:3000/api/auth/callback/google
+http://127.0.0.1:3001/api/auth/callback/google
+http://localhost:3001/api/auth/callback/google
 https://YOUR_VERCEL_DOMAIN/api/auth/callback/google
 ```
 
-5. Set these Vercel environment variables:
+5. For the local auth port, set these values in `.env.local`:
 
 ```text
+AUTH_REQUIRED=true
+AUTH_SECRET=<random 32+ byte secret>
+AUTH_URL=http://127.0.0.1:3001
+NEXTAUTH_URL=http://127.0.0.1:3001
+AUTH_GOOGLE_ID=<real Google OAuth client id>
+AUTH_GOOGLE_SECRET=<real Google OAuth client secret>
+```
+
+6. Set these Vercel environment variables:
+
+```text
+AUTH_REQUIRED
 AUTH_SECRET
+AUTH_URL
 AUTH_GOOGLE_ID
 AUTH_GOOGLE_SECRET
-NEXT_PUBLIC_GOOGLE_MAPS_API_KEY
 NEXT_PUBLIC_ALLOWED_DOMAIN
 MOVING_TARGET_API_URL
 MOVING_TARGET_API_TOKEN

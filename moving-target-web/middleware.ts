@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
-import { auth, isGoogleAuthConfigured } from "./auth";
+import { auth, isAuthRequired, isGoogleAuthConfigured } from "./auth";
 
-export const middleware = isGoogleAuthConfigured()
+export const middleware = isAuthRequired() && isGoogleAuthConfigured()
   ? auth
   : function localDevelopmentMiddleware() {
       return NextResponse.next();

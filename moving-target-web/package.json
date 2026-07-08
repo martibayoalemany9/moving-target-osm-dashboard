@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "npm run dev:public",
+    "dev:public": "AUTH_REQUIRED=false next dev --hostname 127.0.0.1 --port 3000",
+    "dev:auth": "AUTH_REQUIRED=true AUTH_URL=http://127.0.0.1:3001 NEXTAUTH_URL=http://127.0.0.1:3001 next dev --hostname 127.0.0.1 --port 3001",
     "build": "next build",
     "start": "next start",
     "lint": "next lint"

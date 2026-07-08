@@ -17,11 +17,44 @@ type Payload = {
   status?: Record<string, unknown>;
 };
 
+type Point = {
+  lat: number;
+  lon: number;
+};
+
 function accessPoint(sample?: Sample) {
   return sample?.router_geo?.access_point_name
     || sample?.router_geo?.first_hop?.host
     || sample?.router_geo?.first_hop?.ips?.[0]
     || "waiting for traceroute hop 1";
+}
+
+function samplePoint(sample?: Sample): Point | null {
+  const lat = sample?.location?.lat;
+  const lon = sample?.location?.lon;
+  if (typeof lat !== "number" || typeof lon !== "number") return null;
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  return { lat, lon };
+}
+
+function osmEmbedUrl(points: Point[]) {
+  const fallback = { lat: 52.52, lon: 13.405 };
+  const latest = points.at(-1) || fallback;
+  const lats = points.length ? points.map(point => point.lat) : [fallback.lat];
+  const lons = points.length ? points.map(point => point.lon) : [fallback.lon];
+  const minLat = Math.min(...lats);
+  const maxLat = Math.max(...lats);
+  const minLon = Math.min(...lons);
+  const maxLon = Math.max(...lons);
+  const latPad = Math.max((maxLat - minLat) * 0.35, 0.02);
+  const lonPad = Math.max((maxLon - minLon) * 0.35, 0.02);
+  const bbox = [
+    minLon - lonPad,
+    minLat - latPad,
+    maxLon + lonPad,
+    maxLat + latPad
+  ].map(value => value.toFixed(6)).join(",");
+  return `https://www.openstreetmap.org/export/embed.html?bbox=${bbox}&layer=mapnik&marker=${latest.lat.toFixed(6)},${latest.lon.toFixed(6)}`;
 }
 
 export default function DashboardClient() {
@@ -46,7 +79,8 @@ export default function DashboardClient() {
   }, []);
 
   const latest = payload.samples.at(-1);
-  const points = useMemo(() => payload.samples.filter(s => s.location?.lat && s.location?.lon), [payload.samples]);
+  const points = useMemo(() => payload.samples.map(samplePoint).filter((point): point is Point => Boolean(point)), [payload.samples]);
+  const mapUrl = useMemo(() => osmEmbedUrl(points), [points]);
 
   return (
     <main className="dashboard">
@@ -63,10 +97,15 @@ export default function DashboardClient() {
 
       <section className="content-grid">
         <div className="map-pane">
-          <div className="map-placeholder">
-            <strong>Map surface</strong>
+          <iframe
+            className="osm-map"
+            title="OpenStreetMap moving target map"
+            src={mapUrl}
+            loading="lazy"
+          />
+          <div className="map-status">
+            <strong>OpenStreetMap</strong>
             <span>{points.length} geolocated sample{points.length === 1 ? "" : "s"}</span>
-            <small>Set `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY` to replace this with Google Maps rendering.</small>
           </div>
         </div>
         <div className="details">
