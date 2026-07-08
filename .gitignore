@@ -12,12 +12,12 @@ moving_client_data_samples_*.jsonl
 moving_client_data_samples_*.html
 satellite_probe_*.txt
 
-tools/osm_extracts/
+apps/python-dashboard/tools/osm_extracts/
 *.osm.pbf
 
 .DS_Store
 
-android-auto/.gradle/
-android-auto/build/
-android-auto/local.properties
-android-auto/app/build/
+apps/android-auto/.gradle/
+apps/android-auto/build/
+apps/android-auto/local.properties
+apps/android-auto/app/build/

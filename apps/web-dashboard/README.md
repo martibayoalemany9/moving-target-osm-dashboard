@@ -100,6 +100,6 @@ that returns the Python dashboard JSON shape:
 
 ## Android Auto Scaffold
 
-The `android-auto/` folder contains a starter Android Auto project skeleton.
+The `../android-auto/` folder contains a starter Android Auto project skeleton.
 Android Auto apps are not deployed through Vercel; they are packaged as Android
 apps and must follow Android for Cars app category and template restrictions.

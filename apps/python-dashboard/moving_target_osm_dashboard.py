@@ -28,6 +28,80 @@ TRACE_TARGET = "google.com"
 DEFAULT_WIRELESS_ADB_HOST = "100.77.37.113"
 DEFAULT_WIRELESS_ADB_PORT = 5555
 DEFAULT_WIRELESS_ADB_SERIAL = f"{DEFAULT_WIRELESS_ADB_HOST}:{DEFAULT_WIRELESS_ADB_PORT}"
+ADB_COMMANDS = {
+    "stay_awake_plugged": {
+        "label": "Stay awake while plugged",
+        "command": "settings put global stay_on_while_plugged_in 3",
+        "mutating": True,
+        "description": "Keep the Android screen awake while USB or charging power is connected.",
+    },
+    "enable_bluetooth_hci_log": {
+        "label": "Enable Bluetooth HCI log",
+        "command": "settings put secure bluetooth_hci_log 1",
+        "mutating": True,
+        "description": "Ask Android to enable Bluetooth HCI snoop logging when the build allows it.",
+    },
+    "bluetooth_verbose": {
+        "label": "Bluetooth verbose logs",
+        "command": "setprop persist.log.tag.bluetooth VERBOSE",
+        "mutating": True,
+        "description": "Set the persistent Bluetooth log tag to verbose.",
+    },
+    "bluetooth_disable": {
+        "label": "Bluetooth off",
+        "command": "svc bluetooth disable",
+        "mutating": True,
+        "description": "Disable Bluetooth through Android service controls.",
+    },
+    "bluetooth_enable": {
+        "label": "Bluetooth on",
+        "command": "svc bluetooth enable",
+        "mutating": True,
+        "description": "Enable Bluetooth through Android service controls.",
+    },
+    "oem_unlock_supported": {
+        "label": "OEM unlock supported",
+        "command": "getprop ro.oem_unlock_supported",
+        "mutating": False,
+        "description": "Read whether this build reports OEM unlock support.",
+    },
+    "oem_unlock_allowed": {
+        "label": "OEM unlock allowed",
+        "command": "settings get global oem_unlock_allowed",
+        "mutating": False,
+        "description": "Read the global OEM unlock allowed setting.",
+    },
+    "activity_services": {
+        "label": "Activity services",
+        "command": "dumpsys activity services",
+        "mutating": False,
+        "description": "Inspect Android activity-manager services.",
+    },
+    "connectivity": {
+        "label": "Connectivity",
+        "command": "dumpsys connectivity",
+        "mutating": False,
+        "description": "Inspect connectivity manager state.",
+    },
+    "bluetooth_manager": {
+        "label": "Bluetooth manager",
+        "command": "dumpsys bluetooth_manager",
+        "mutating": False,
+        "description": "Inspect Bluetooth manager state.",
+    },
+    "wifi": {
+        "label": "Wi-Fi",
+        "command": "dumpsys wifi",
+        "mutating": False,
+        "description": "Inspect Wi-Fi manager state.",
+    },
+    "net_dev": {
+        "label": "Network devices",
+        "command": "cat /proc/net/dev",
+        "mutating": False,
+        "description": "Read network interface byte and packet counters.",
+    },
+}
 MAX_CORRECTION_DISTANCE_KM = 1.0
 BROWSER_GPS_MAX_AGE_SECONDS = 60
 REDIS_SAMPLE_HISTORY_COUNT = 5000
@@ -635,6 +709,15 @@ def adb_connect_wireless(adb, host=DEFAULT_WIRELESS_ADB_HOST, port=DEFAULT_WIREL
         "stderr": out["stderr"].strip(),
         "code": out["code"],
     }
+
+
+def current_adb_context():
+    with STATE_LOCK:
+        config = dict(STATE.get("config") or {})
+        selected = STATE.get("adb_serial_override") or config.get("serial")
+    adb_path = config.get("adb") or shutil.which("adb") or "/Users/username/Library/Android/sdk/platform-tools/adb"
+    adb, serial, status = choose_adb(adb_path, selected)
+    return adb, serial, status
 
 
 def parse_location(text):
@@ -1896,6 +1979,20 @@ def page_html():
     .prop-grid .key { font-weight: 650; color: #35424d; }
     .adb-row { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
     .adb-row select { min-width: 180px; border: 1px solid #aab5bd; border-radius: 5px; font: inherit; font-size: 12px; padding: 6px 8px; }
+    .adb-command-panel { margin-top: 8px; border-top: 1px solid #d8dee4; padding-top: 8px; display: grid; gap: 7px; }
+    .adb-command-title { font-weight: 700; color: #24313c; }
+    .adb-command-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+    .adb-command-grid button[data-mutating="true"] { border-color: #b7791f; background: #fffaf0; }
+    .adb-output {
+      white-space: pre-wrap; overflow: auto; min-height: 90px; max-height: 230px;
+      border: 1px solid #d6dde3; background: #f4f6f8; padding: 8px; border-radius: 5px;
+      font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+    .shell-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .shell-row input {
+      min-width: min(520px, 100%); flex: 1; border: 1px solid #aab5bd; border-radius: 5px;
+      font: 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; padding: 7px 8px;
+    }
     .wifi-edit { display: flex; gap: 6px; margin-top: 8px; }
     .wifi-edit input {
       min-width: 0; flex: 1; border: 1px solid #aab5bd; border-radius: 5px;
@@ -1966,6 +2063,12 @@ def page_html():
           <button id="refreshAdb" type="button">Refresh ADB</button>
           <button id="connectAdb" type="button">Connect 100.77.37.113</button>
         </div>
+        <div class="adb-command-panel">
+          <div class="adb-command-title">ADB write commands</div>
+          <div class="adb-command-grid" id="adbWriteCommands"></div>
+          <div class="adb-command-title">ADB inspect commands</div>
+          <div class="adb-command-grid" id="adbInspectCommands"></div>
+        </div>
         <div class="actions">
           <button id="toggleCollection" type="button">Stop collection</button>
           <button id="zoomLatest" type="button">Zoom latest</button>
@@ -2019,6 +2122,7 @@ def page_html():
         <button class="tab" data-tab="errorPane" type="button">Error logs</button>
         <button class="tab" data-tab="eventPane" type="button">Application events</button>
         <button class="tab" data-tab="redisQueryPane" type="button">Redis query</button>
+        <button class="tab" data-tab="adbShellPane" type="button">ADB shell</button>
       </div>
       <div id="plotPane" class="tab-pane chart-scroll">
         <div id="gpsSourceBar" class="gps-source-bar" title="GPS source / correction formula per sample"></div>
@@ -2046,6 +2150,14 @@ def page_html():
           <span id="redisQueryStatus">Ready. Sample prompt queries yesterday's application events and error logs.</span>
         </div>
         <div id="redisQueryRows" class="error-grid"></div>
+      </div>
+      <div id="adbShellPane" class="tab-pane hidden redis-query">
+        <div class="shell-row">
+          <label for="adbShellInput">adb shell</label>
+          <input id="adbShellInput" type="text" value="dumpsys connectivity" spellcheck="false">
+          <button id="runAdbShell" type="button">Run</button>
+        </div>
+        <pre id="adbShellOutput" class="adb-output">Select an ADB device, then run an inspect command or type an adb shell command here.</pre>
       </div>
     </div>
   </div>
@@ -2198,6 +2310,87 @@ def page_html():
     let plotFollowLatest = true;
     let osmStatusTimer = null;
     const cityCache = new Map();
+    const adbCommandCatalog = [
+      { id: 'stay_awake_plugged', label: 'Stay awake while plugged', command: 'settings put global stay_on_while_plugged_in 3', mutating: true },
+      { id: 'enable_bluetooth_hci_log', label: 'Enable BT HCI log', command: 'settings put secure bluetooth_hci_log 1', mutating: true },
+      { id: 'bluetooth_verbose', label: 'BT verbose logs', command: 'setprop persist.log.tag.bluetooth VERBOSE', mutating: true },
+      { id: 'bluetooth_disable', label: 'Bluetooth off', command: 'svc bluetooth disable', mutating: true },
+      { id: 'bluetooth_enable', label: 'Bluetooth on', command: 'svc bluetooth enable', mutating: true },
+      { id: 'oem_unlock_supported', label: 'OEM unlock supported', command: 'getprop ro.oem_unlock_supported', mutating: false },
+      { id: 'oem_unlock_allowed', label: 'OEM unlock allowed', command: 'settings get global oem_unlock_allowed', mutating: false },
+      { id: 'activity_services', label: 'Activity services', command: 'dumpsys activity services', mutating: false },
+      { id: 'connectivity', label: 'Connectivity', command: 'dumpsys connectivity', mutating: false },
+      { id: 'bluetooth_manager', label: 'Bluetooth manager', command: 'dumpsys bluetooth_manager', mutating: false },
+      { id: 'wifi', label: 'Wi-Fi', command: 'dumpsys wifi', mutating: false },
+      { id: 'net_dev', label: 'Network devices', command: 'cat /proc/net/dev', mutating: false }
+    ];
+
+    function formatAdbResult(data) {
+      const lines = [
+        `$ adb${data.serial ? ` -s ${data.serial}` : ''} shell ${data.command || ''}`,
+        `exit=${data.code ?? 'n/a'} ok=${data.ok ? 'true' : 'false'}`,
+      ];
+      if (data.error) lines.push(`error: ${data.error}`);
+      if (data.stdout) lines.push('', 'stdout:', data.stdout);
+      if (data.stderr) lines.push('', 'stderr:', data.stderr);
+      if (!data.stdout && !data.stderr && !data.error) lines.push('', '(no output)');
+      return lines.join('\\n');
+    }
+
+    function showAdbResult(data) {
+      const output = document.getElementById('adbShellOutput');
+      if (output) output.textContent = formatAdbResult(data);
+      document.getElementById('status').textContent = data.ok
+        ? `ADB command completed: ${data.command || data.id || 'shell'}`
+        : `ADB command failed: ${data.error || data.stderr || 'unknown error'}`;
+    }
+
+    function renderAdbCommandButtons() {
+      const writeBox = document.getElementById('adbWriteCommands');
+      const inspectBox = document.getElementById('adbInspectCommands');
+      if (!writeBox || !inspectBox) return;
+      writeBox.innerHTML = '';
+      inspectBox.innerHTML = '';
+      for (const item of adbCommandCatalog) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.dataset.commandId = item.id;
+        button.dataset.mutating = item.mutating ? 'true' : 'false';
+        button.title = item.command;
+        button.textContent = item.label;
+        button.addEventListener('click', () => runAdbCommand(item));
+        (item.mutating ? writeBox : inspectBox).appendChild(button);
+      }
+    }
+
+    async function runAdbCommand(item) {
+      if (item.mutating && !window.confirm(`Run write command on the selected Android device?\\n\\nadb shell ${item.command}`)) return;
+      document.getElementById('status').textContent = `Running ADB command: ${item.command}`;
+      const res = await fetch('/api/adb-command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: item.id })
+      });
+      const data = await res.json();
+      showAdbResult(data);
+    }
+
+    async function runAdbShellCommand() {
+      const input = document.getElementById('adbShellInput');
+      const command = (input?.value || '').trim();
+      if (!command) {
+        document.getElementById('status').textContent = 'Type an adb shell command first.';
+        return;
+      }
+      document.getElementById('status').textContent = `Running adb shell ${command}`;
+      const res = await fetch('/api/adb-shell', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command })
+      });
+      const data = await res.json();
+      showAdbResult(data);
+    }
 
     function color(ms) {
       if (ms === null || ms === undefined) return '#777777';
@@ -3468,6 +3661,7 @@ def page_html():
       refreshLogs();
     }
 
+    renderAdbCommandButtons();
     loadInitial().catch(err => {
       document.getElementById('status').textContent = `Initial load failed: ${err}`;
     });
@@ -3624,6 +3818,10 @@ def page_html():
       });
     });
     document.getElementById('refreshAdb').addEventListener('click', refreshAdbDevices);
+    document.getElementById('runAdbShell').addEventListener('click', runAdbShellCommand);
+    document.getElementById('adbShellInput').addEventListener('keydown', ev => {
+      if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) runAdbShellCommand();
+    });
     document.getElementById('connectAdb').addEventListener('click', async () => {
       let serial = '100.77.37.113:5555';
       const select = document.getElementById('adbDevices');
@@ -4023,6 +4221,63 @@ class Handler(BaseHTTPRequestHandler):
                 STATE["config"] = config
             add_log("info", "adb", f"Selected ADB device: {serial or 'auto'}")
             self.send_bytes(json.dumps({"ok": True, "serial": serial or None}).encode("utf-8"), "application/json; charset=utf-8")
+            return
+
+        if parsed.path == "/api/adb-command":
+            command_id = str(payload.get("id", "")).strip()
+            spec = ADB_COMMANDS.get(command_id)
+            if not spec:
+                self.send_bytes(b'{"ok":false,"error":"unknown adb command id"}', "application/json; charset=utf-8", status=400)
+                return
+            adb, serial, adb_status = current_adb_context()
+            if not adb:
+                result = {"ok": False, "error": adb_status.get("message") or "adb not found", "id": command_id, "command": spec["command"], "adb_status": adb_status}
+                self.send_bytes(json.dumps(result, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8", status=400)
+                return
+            out = adb_shell(adb, serial, spec["command"], timeout=25)
+            result = {
+                "ok": out["ok"],
+                "id": command_id,
+                "label": spec["label"],
+                "command": spec["command"],
+                "mutating": spec["mutating"],
+                "adb": adb,
+                "serial": serial,
+                "code": out["code"],
+                "stdout": out["stdout"],
+                "stderr": out["stderr"],
+                "adb_status": adb_status,
+            }
+            add_log("info" if out["ok"] else "error", "adb", f"Ran ADB command {command_id}", {"command": spec["command"], "serial": serial, "code": out["code"], "stderr": out["stderr"][-500:]})
+            self.send_bytes(json.dumps(result, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8", status=200 if out["ok"] else 400)
+            return
+
+        if parsed.path == "/api/adb-shell":
+            command = str(payload.get("command", "")).strip()
+            if not command:
+                self.send_bytes(b'{"ok":false,"error":"command required"}', "application/json; charset=utf-8", status=400)
+                return
+            if len(command) > 500:
+                self.send_bytes(b'{"ok":false,"error":"command too long"}', "application/json; charset=utf-8", status=400)
+                return
+            adb, serial, adb_status = current_adb_context()
+            if not adb:
+                result = {"ok": False, "error": adb_status.get("message") or "adb not found", "command": command, "adb_status": adb_status}
+                self.send_bytes(json.dumps(result, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8", status=400)
+                return
+            out = adb_shell(adb, serial, command, timeout=25)
+            result = {
+                "ok": out["ok"],
+                "command": command,
+                "adb": adb,
+                "serial": serial,
+                "code": out["code"],
+                "stdout": out["stdout"],
+                "stderr": out["stderr"],
+                "adb_status": adb_status,
+            }
+            add_log("info" if out["ok"] else "error", "adb", "Ran ADB shell command", {"command": command, "serial": serial, "code": out["code"], "stderr": out["stderr"][-500:]})
+            self.send_bytes(json.dumps(result, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8", status=200 if out["ok"] else 400)
             return
 
         if parsed.path == "/api/client-log":
