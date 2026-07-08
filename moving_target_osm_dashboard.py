@@ -25,6 +25,9 @@ DEFAULT_TARGETS = [
 ]
 
 TRACE_TARGET = "google.com"
+DEFAULT_WIRELESS_ADB_HOST = "100.77.37.113"
+DEFAULT_WIRELESS_ADB_PORT = 5555
+DEFAULT_WIRELESS_ADB_SERIAL = f"{DEFAULT_WIRELESS_ADB_HOST}:{DEFAULT_WIRELESS_ADB_PORT}"
 MAX_CORRECTION_DISTANCE_KM = 1.0
 BROWSER_GPS_MAX_AGE_SECONDS = 60
 REDIS_SAMPLE_HISTORY_COUNT = 5000
@@ -81,6 +84,7 @@ STATE = {
     "osm_downloads": {},
     "collection_enabled": True,
     "last_router_geo": None,
+    "gcp_redis_plan": None,
 }
 STATE_LOCK = threading.Lock()
 
@@ -621,6 +625,18 @@ def adb_devices(adb):
     return out, devices
 
 
+def adb_connect_wireless(adb, host=DEFAULT_WIRELESS_ADB_HOST, port=DEFAULT_WIRELESS_ADB_PORT):
+    serial = f"{host}:{port}"
+    out = run([adb, "connect", serial], timeout=6)
+    return {
+        "ok": out["ok"] and "unable" not in out["stdout"].lower() and "failed" not in out["stdout"].lower(),
+        "serial": serial,
+        "stdout": out["stdout"].strip(),
+        "stderr": out["stderr"].strip(),
+        "code": out["code"],
+    }
+
+
 def parse_location(text):
     matches = re.findall(
         r"Location\[[^\]\n]*?\s(-?\d+\.\d+),\s*(-?\d+\.\d+)(?:[^\]\n]*?hAcc=([0-9.]+))?",
@@ -1025,19 +1041,32 @@ def enrich_motion(sample):
 
 def choose_adb(adb_path, serial):
     adb = adb_path or shutil.which("adb")
-    status = {"available": bool(adb), "path": adb, "selected_serial": serial}
+    status = {
+        "available": bool(adb),
+        "path": adb,
+        "selected_serial": serial,
+        "wireless_serial": DEFAULT_WIRELESS_ADB_SERIAL,
+    }
     if not adb:
         status["message"] = "adb not found; GPS and radio fields unavailable."
         return None, None, status
     out, devices = adb_devices(adb)
+    ready = [d for d in devices if d["state"] == "device"]
+    if not ready and not serial:
+        connect_result = adb_connect_wireless(adb)
+        status["wireless_connect"] = connect_result
+        out, devices = adb_devices(adb)
+        ready = [d for d in devices if d["state"] == "device"]
     status["devices"] = devices
     if not serial:
-        ready = [d for d in devices if d["state"] == "device"]
-        if ready:
+        wireless_ready = [d for d in ready if d["serial"] == DEFAULT_WIRELESS_ADB_SERIAL]
+        if wireless_ready:
+            serial = wireless_ready[0]["serial"]
+        elif ready:
             serial = ready[0]["serial"]
     status["selected_serial"] = serial
     if not serial:
-        status["message"] = "No authorized ADB device; unlock phone and approve USB debugging."
+        status["message"] = f"No authorized ADB device; tried wireless {DEFAULT_WIRELESS_ADB_SERIAL}. Unlock phone and approve debugging."
     return adb, serial, status
 
 
@@ -1069,6 +1098,8 @@ def collect_one(config, adb, serial, adb_status):
     if settings.get("use_adb_gps", True) and adb and serial:
         loc_out = adb_shell(adb, serial, "dumpsys location", timeout=8)
         sample["location"] = parse_location(loc_out["stdout"])
+        if sample["location"] and sample["location"].get("accuracy_m") is not None:
+            sample["location"]["gps_accuracy_m"] = sample["location"].get("accuracy_m")
         sample["location_status"] = {"ok": loc_out["ok"], "stderr": loc_out["stderr"][-250:]}
 
         props_cmd = "getprop | grep -E 'gsm\\.|ril\\.|ro\\.product|ro\\.build.version.release'"
@@ -1097,9 +1128,12 @@ def collect_one(config, adb, serial, adb_status):
                     "lat": browser_loc["lat"],
                     "lon": browser_loc["lon"],
                     "accuracy_m": browser_loc.get("accuracy_m"),
+                    "gps_accuracy_m": browser_loc.get("gps_accuracy_m", browser_loc.get("accuracy_m")),
                     "source": "browser",
                     "received_utc": browser_loc.get("received_utc"),
                     "age_seconds": round(age_seconds, 1),
+                    "latency": browser_loc.get("latency") or [],
+                    "latency_summary": browser_loc.get("latency_summary") or {},
                 }
                 sample["location_status"] = {"ok": True, "source": "browser-geolocation", "age_seconds": round(age_seconds, 1)}
             else:
@@ -1314,6 +1348,53 @@ def execute_redis_log_query(config, query):
             "end": end.isoformat(timespec="seconds") if end else None,
         },
         "redis_keys": [f"{redis_prefix}:error_logs", f"{redis_prefix}:event_logs"],
+    }
+
+
+def build_gcp_redis_plan(payload):
+    project = str(payload.get("project", "")).strip()
+    region = str(payload.get("region", "europe-west1")).strip() or "europe-west1"
+    instance = str(payload.get("instance", "moving-target-redis")).strip() or "moving-target-redis"
+    tier = str(payload.get("tier", "basic")).strip().lower()
+    memory_gb = str(payload.get("memory_gb", "1")).strip() or "1"
+    network = str(payload.get("network", "default")).strip() or "default"
+    prefix = str(payload.get("redis_prefix", "moving_client_data")).strip() or "moving_client_data"
+
+    if not re.match(r"^[a-z][a-z0-9-]{2,39}$", instance):
+        return {"ok": False, "error": "Instance name must be 3-40 chars, lowercase letters, numbers, and hyphens, starting with a letter."}
+    if tier not in {"basic", "standard"}:
+        return {"ok": False, "error": "Tier must be basic or standard."}
+    try:
+        memory_value = int(memory_gb)
+    except ValueError:
+        return {"ok": False, "error": "Memory size must be an integer GB value."}
+    if memory_value < 1 or memory_value > 300:
+        return {"ok": False, "error": "Memory size must be between 1 and 300 GB."}
+
+    project_arg = f" --project={project}" if project else ""
+    commands = [
+        (
+            f"gcloud redis instances create {instance}"
+            f"{project_arg} --region={region} --tier={tier.upper()}"
+            f" --size={memory_value} --network={network} --redis-version=redis_7_0"
+        ),
+        f"gcloud redis instances describe {instance}{project_arg} --region={region} --format='get(host,port)'",
+        "export MOVING_TARGET_REDIS_URL='redis://<HOST>:<PORT>/0'",
+        f"./moving_target_osm_dashboard.py --redis-url \"$MOVING_TARGET_REDIS_URL\" --redis-prefix {prefix}",
+    ]
+    return {
+        "ok": True,
+        "preview_only": True,
+        "provider": "gcp-memorystore-redis",
+        "project": project,
+        "region": region,
+        "instance": instance,
+        "tier": tier,
+        "memory_gb": memory_value,
+        "network": network,
+        "redis_prefix": prefix,
+        "commands": commands,
+        "note": "Creation is held as a backend plan only. The Python app does not execute gcloud or create billable GCP resources.",
     }
 
 
@@ -1584,6 +1665,7 @@ def collector_loop(config):
     log_path = Path(config["log"])
     redis_client = RedisClient(config["redis_url"]) if config.get("redis_url") else None
     redis_prefix = config.get("redis_prefix") or "moving_client_data"
+    active_redis_url = config.get("redis_url")
     restore_info = restore_from_redis(redis_client, redis_prefix)
     adb, serial, adb_status = choose_adb(config.get("adb"), config.get("serial"))
     with STATE_LOCK:
@@ -1612,6 +1694,19 @@ def collector_loop(config):
                 selected_serial = STATE.get("adb_serial_override") or config.get("serial")
             adb, serial, adb_status = choose_adb(config.get("adb"), selected_serial)
             with STATE_LOCK:
+                STATE["status"] = {"adb": adb_status, "log": str(log_path), "redis": STATE["redis"]}
+        with STATE_LOCK:
+            runtime_config = dict(STATE.get("config") or {})
+        runtime_redis_url = runtime_config.get("redis_url")
+        runtime_redis_prefix = runtime_config.get("redis_prefix") or "moving_client_data"
+        if runtime_redis_url != active_redis_url or runtime_redis_prefix != redis_prefix:
+            active_redis_url = runtime_redis_url
+            redis_prefix = runtime_redis_prefix
+            redis_client = RedisClient(active_redis_url) if active_redis_url else None
+            with STATE_LOCK:
+                STATE["redis"] = redis_status(redis_client)
+                if redis_client:
+                    STATE["redis"]["prefix"] = redis_prefix
                 STATE["status"] = {"adb": adb_status, "log": str(log_path), "redis": STATE["redis"]}
         sample = collect_one(config, adb, serial, adb_status)
         append_sample(sample, log_path, redis_client=redis_client, redis_prefix=redis_prefix)
@@ -1869,7 +1964,7 @@ def page_html():
         <div class="adb-row">
           <select id="adbDevices"><option value="">ADB auto/no device</option></select>
           <button id="refreshAdb" type="button">Refresh ADB</button>
-          <button id="connectAdb" type="button">Connect ADB</button>
+          <button id="connectAdb" type="button">Connect 100.77.37.113</button>
         </div>
         <div class="actions">
           <button id="toggleCollection" type="button">Stop collection</button>
@@ -1970,6 +2065,25 @@ def page_html():
         <label><input id="useAccelerometer" type="checkbox"> Record accelerometer</label><div>Stores browser motion readings. It is not applied to GPS unless a correction formula uses it.</div>
         <label><input id="allowInterpolatedFallback" type="checkbox"> Allow interpolated fallback</label><div>Creates positions on the selected six-hour track only when no real GPS is available.</div>
         <label for="providerInput">Provider override</label><input id="providerInput" type="text" placeholder="auto from traceroute/DNS">
+        <label for="redisUrl">Redis URL</label><input id="redisUrl" type="text" placeholder="redis://127.0.0.1:6379/0">
+        <label for="redisPrefix">Redis prefix</label><input id="redisPrefix" type="text" placeholder="moving_client_data">
+        <label>GCP Redis creation</label>
+        <div class="osm-progress">
+          <div class="settings-inline">
+            <input id="gcpRedisProject" type="text" placeholder="GCP project id">
+            <input id="gcpRedisRegion" type="text" placeholder="europe-west1" value="europe-west1">
+          </div>
+          <div class="settings-inline">
+            <input id="gcpRedisInstance" type="text" placeholder="moving-target-redis" value="moving-target-redis">
+            <select id="gcpRedisTier"><option value="basic">basic</option><option value="standard">standard</option></select>
+            <input id="gcpRedisMemory" type="number" min="1" max="300" value="1" title="Memory GB">
+          </div>
+          <div class="settings-inline">
+            <input id="gcpRedisNetwork" type="text" placeholder="default" value="default">
+            <button id="planGcpRedis" type="button">Plan GCP Redis</button>
+          </div>
+          <pre id="gcpRedisPlan" class="osm-report">No GCP Redis plan generated yet.</pre>
+        </div>
         <label for="modalBg">Modal background color</label><input id="modalBg" type="color">
         <label for="panelOpacity">Panel transparency</label><input id="panelOpacity" type="range" min="35" max="100" step="1">
         <label for="modalOpacity">Modal transparency</label><input id="modalOpacity" type="range" min="55" max="100" step="1">
@@ -2554,6 +2668,8 @@ def page_html():
       document.getElementById('useAccelerometer').checked = !!settings.use_accelerometer;
       document.getElementById('allowInterpolatedFallback').checked = !!settings.allow_interpolated_fallback;
       document.getElementById('providerInput').value = settings.provider || '';
+      document.getElementById('redisUrl').value = settings.redis_url || '';
+      document.getElementById('redisPrefix').value = settings.redis_prefix || 'moving_client_data';
       document.getElementById('modalBg').value = settings.modal_bg || '#ffffff';
       document.getElementById('panelOpacity').value = Math.round(Number(settings.panel_opacity ?? 0.78) * 100);
       document.getElementById('modalOpacity').value = Math.round(Number(settings.modal_opacity ?? 1.0) * 100);
@@ -2571,6 +2687,8 @@ def page_html():
         use_accelerometer: document.getElementById('useAccelerometer').checked,
         allow_interpolated_fallback: document.getElementById('allowInterpolatedFallback').checked,
         provider: document.getElementById('providerInput').value.trim(),
+        redis_url: document.getElementById('redisUrl').value.trim(),
+        redis_prefix: document.getElementById('redisPrefix').value.trim() || 'moving_client_data',
         modal_bg: document.getElementById('modalBg').value,
         panel_opacity: Number(document.getElementById('panelOpacity').value) / 100,
         modal_opacity: Number(document.getElementById('modalOpacity').value) / 100,
@@ -3179,9 +3297,11 @@ def page_html():
           if (device.serial === data.selected) opt.selected = true;
           select.appendChild(opt);
         }
+        const wireless = data.wireless_connect;
+        const suffix = wireless ? ` · wireless ${data.wireless_serial}: ${wireless.stdout || wireless.stderr || 'attempted'}` : '';
         document.getElementById('status').textContent = (data.devices || []).length
-          ? `ADB devices found: ${(data.devices || []).length}`
-          : 'ADB has no visible devices. Check USB data mode and debugging authorization.';
+          ? `ADB devices found: ${(data.devices || []).length}${suffix}`
+          : `ADB has no visible devices. Tried wireless ${data.wireless_serial}. Check wireless debugging and pairing.${suffix}`;
       } catch (err) {
         document.getElementById('status').textContent = `ADB refresh failed: ${err}`;
         clientLog('error', 'adb', 'ADB refresh failed', String(err));
@@ -3448,6 +3568,36 @@ def page_html():
         document.getElementById('status').textContent = `Settings failed: ${data.error || 'unknown error'}`;
       }
     });
+    document.getElementById('planGcpRedis').addEventListener('click', async () => {
+      const out = document.getElementById('gcpRedisPlan');
+      out.textContent = 'Building backend-held GCP Redis plan...';
+      const payload = {
+        project: document.getElementById('gcpRedisProject').value.trim(),
+        region: document.getElementById('gcpRedisRegion').value.trim() || 'europe-west1',
+        instance: document.getElementById('gcpRedisInstance').value.trim() || 'moving-target-redis',
+        tier: document.getElementById('gcpRedisTier').value,
+        memory_gb: document.getElementById('gcpRedisMemory').value || '1',
+        network: document.getElementById('gcpRedisNetwork').value.trim() || 'default',
+        redis_prefix: document.getElementById('redisPrefix').value.trim() || 'moving_client_data'
+      };
+      try {
+        const res = await fetch('/api/gcp-redis-plan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.error || 'plan failed');
+        out.textContent = [
+          data.note,
+          '',
+          ...data.commands
+        ].join('\\n');
+        document.getElementById('status').textContent = 'GCP Redis plan generated. No cloud resources were created.';
+      } catch (err) {
+        out.textContent = `GCP Redis plan failed: ${err.message}`;
+      }
+    });
     ['panelOpacity', 'modalOpacity', 'modalBg', 'summaryDock', 'detailsDock', 'chartDock', 'routeTrack'].forEach(id => {
       document.getElementById(id).addEventListener('input', () => applySettings(settingsFromForm()));
       document.getElementById(id).addEventListener('change', () => applySettings(settingsFromForm()));
@@ -3475,14 +3625,16 @@ def page_html():
     });
     document.getElementById('refreshAdb').addEventListener('click', refreshAdbDevices);
     document.getElementById('connectAdb').addEventListener('click', async () => {
-      const serial = document.getElementById('adbDevices').value;
+      let serial = '100.77.37.113:5555';
+      const select = document.getElementById('adbDevices');
+      if ([...select.options].some(opt => opt.value === serial)) select.value = serial;
       const res = await fetch('/api/adb-select', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ serial })
       });
       const data = await res.json();
-      document.getElementById('status').textContent = data.ok ? `ADB selection saved: ${data.serial || 'auto'}` : `ADB selection failed`;
+      document.getElementById('status').textContent = data.ok ? `ADB wireless selected: ${data.serial || 'auto'}` : `ADB wireless selection failed`;
       await refreshAdbDevices();
     });
     document.getElementById('saveWifiLabel').addEventListener('click', async () => {
@@ -3535,15 +3687,23 @@ def page_html():
         const payload = {
           lat: position.coords.latitude,
           lon: position.coords.longitude,
-          accuracy_m: position.coords.accuracy
+          accuracy_m: position.coords.accuracy,
+          altitude_m: position.coords.altitude,
+          altitude_accuracy_m: position.coords.altitudeAccuracy,
+          heading_deg: position.coords.heading,
+          speed_mps: position.coords.speed,
+          browser_timestamp_ms: position.timestamp
         };
         try {
-          await fetch('/api/browser-location', {
+          const res = await fetch('/api/browser-location', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
           });
-          document.getElementById('status').textContent = `Browser GPS active: ${payload.lat.toFixed(5)}, ${payload.lon.toFixed(5)} accuracy ${Math.round(payload.accuracy_m || 0)}m`;
+          const data = await res.json();
+          const gpsLoc = data.location || payload;
+          map.setView([gpsLoc.lat, gpsLoc.lon], Math.max(map.getZoom(), 15), { animate: true });
+          document.getElementById('status').textContent = `Browser GPS active: ${payload.lat.toFixed(5)}, ${payload.lon.toFixed(5)} accuracy ${Math.round(payload.accuracy_m || 0)}m latency ${data.location?.latency_summary?.avg_ms ?? 'n/a'}ms`;
         } catch (err) {
           document.getElementById('status').textContent = `Browser GPS post failed: ${err}`;
           clientLog('error', 'browser-gps', 'Browser GPS POST failed', String(err));
@@ -3662,7 +3822,17 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/settings":
             with STATE_LOCK:
-                payload = {"ok": True, "settings": STATE["settings"], "route_tracks": public_track_catalog()}
+                settings = dict(STATE["settings"])
+                config = dict(STATE.get("config") or {})
+                if config.get("redis_url"):
+                    settings["redis_url"] = config.get("redis_url")
+                settings["redis_prefix"] = config.get("redis_prefix") or "moving_client_data"
+                payload = {
+                    "ok": True,
+                    "settings": settings,
+                    "route_tracks": public_track_catalog(),
+                    "gcp_redis_plan": STATE.get("gcp_redis_plan"),
+                }
             self.send_bytes(json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/adb-devices":
@@ -3670,8 +3840,20 @@ class Handler(BaseHTTPRequestHandler):
                 config = dict(STATE.get("config") or {})
                 selected = STATE.get("adb_serial_override") or config.get("serial")
             adb = config.get("adb") or shutil.which("adb") or "/Users/username/Library/Android/sdk/platform-tools/adb"
+            connect_result = None
             out, devices = adb_devices(adb)
-            payload = {"ok": out["ok"], "adb": adb, "selected": selected, "devices": devices, "stderr": out["stderr"]}
+            if not any(d.get("serial") == DEFAULT_WIRELESS_ADB_SERIAL and d.get("state") == "device" for d in devices):
+                connect_result = adb_connect_wireless(adb)
+                out, devices = adb_devices(adb)
+            payload = {
+                "ok": out["ok"],
+                "adb": adb,
+                "selected": selected,
+                "devices": devices,
+                "wireless_serial": DEFAULT_WIRELESS_ADB_SERIAL,
+                "wireless_connect": connect_result,
+                "stderr": out["stderr"],
+            }
             self.send_bytes(json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
             return
         if parsed.path == "/api/wifi-info":
@@ -3740,14 +3922,31 @@ class Handler(BaseHTTPRequestHandler):
             except (KeyError, TypeError, ValueError):
                 self.send_bytes(b'{"ok":false,"error":"lat/lon required"}', "application/json; charset=utf-8", status=400)
                 return
+            try:
+                accuracy_m = float(payload.get("accuracy_m")) if payload.get("accuracy_m") is not None else None
+            except (TypeError, ValueError):
+                accuracy_m = None
             loc = {
                 "lat": lat,
                 "lon": lon,
-                "accuracy_m": payload.get("accuracy_m"),
+                "accuracy_m": accuracy_m,
+                "gps_accuracy_m": accuracy_m,
+                "altitude_m": payload.get("altitude_m"),
+                "altitude_accuracy_m": payload.get("altitude_accuracy_m"),
+                "heading_deg": payload.get("heading_deg"),
+                "speed_mps": payload.get("speed_mps"),
+                "browser_timestamp_ms": payload.get("browser_timestamp_ms"),
                 "received_utc": utc_now(),
             }
             redis_result = {"enabled": False}
             with STATE_LOCK:
+                latest_sample = STATE["samples"][-1] if STATE["samples"] else None
+                if latest_sample:
+                    loc["latency"] = latest_sample.get("latency") or []
+                    loc["latency_summary"] = latest_sample.get("latency_summary") or {}
+                    loc["connection_errors"] = latest_sample.get("connection_errors") or {}
+                    loc["latency_sample_sequence"] = latest_sample.get("sequence")
+                    loc["latency_sample_timestamp_utc"] = latest_sample.get("timestamp_utc")
                 STATE["browser_location"] = loc
                 config = dict(STATE.get("config") or {})
             if config.get("redis_url"):
@@ -3865,6 +4064,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_bytes(json.dumps(result, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8", status=status)
             return
 
+        if parsed.path == "/api/gcp-redis-plan":
+            result = build_gcp_redis_plan(payload)
+            if result.get("ok"):
+                with STATE_LOCK:
+                    STATE["gcp_redis_plan"] = result
+            status = 200 if result.get("ok") else 400
+            self.send_bytes(json.dumps(result, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8", status=status)
+            return
+
         if parsed.path == "/api/settings":
             allowed = {
                 "gps_formula",
@@ -3880,6 +4088,8 @@ class Handler(BaseHTTPRequestHandler):
                 "summary_dock",
                 "details_dock",
                 "chart_dock",
+                "redis_url",
+                "redis_prefix",
             }
             docks = {"top-left", "top-right", "left", "right", "bottom"}
             formulas = {"raw", "constant_speed_track", "constant_speed_to_karlsruhe"}
@@ -3909,9 +4119,24 @@ class Handler(BaseHTTPRequestHandler):
                         settings[key] = text if re.match(r"^#[0-9a-fA-F]{6}$", text) else settings.get(key, "#ffffff")
                     elif key == "provider":
                         settings[key] = str(value).strip()[:120]
+                    elif key == "redis_url":
+                        redis_url = str(value).strip()
+                        config = STATE.get("config") or {}
+                        config["redis_url"] = redis_url or None
+                        STATE["config"] = config
+                    elif key == "redis_prefix":
+                        redis_prefix = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(value).strip())[:80] or "moving_client_data"
+                        config = STATE.get("config") or {}
+                        config["redis_prefix"] = redis_prefix
+                        STATE["config"] = config
                 STATE["settings"] = settings
-            add_log("info", "settings", "Updated collection/display settings", settings)
-            self.send_bytes(json.dumps({"ok": True, "settings": settings, "route_tracks": public_track_catalog()}, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+                config = dict(STATE.get("config") or {})
+                response_settings = dict(settings)
+                if config.get("redis_url"):
+                    response_settings["redis_url"] = config.get("redis_url")
+                response_settings["redis_prefix"] = config.get("redis_prefix") or "moving_client_data"
+            add_log("info", "settings", "Updated collection/display settings", response_settings)
+            self.send_bytes(json.dumps({"ok": True, "settings": response_settings, "route_tracks": public_track_catalog()}, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
             return
 
         if parsed.path == "/api/motion-sensor":

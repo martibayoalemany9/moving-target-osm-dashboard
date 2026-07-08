@@ -25,6 +25,34 @@ Useful options:
 ./moving_target_osm_dashboard.py --redis-url redis://127.0.0.1:6379/0 --redis-prefix moving_client_data
 ```
 
+The Python dashboard also tries Android wireless ADB at:
+
+```text
+100.77.37.113:5555
+```
+
+Use the dashboard `Connect 100.77.37.113` button to select that wireless device.
+The phone must already have wireless debugging enabled and paired/trusted for
+this Mac.
+
+## Redis And GPS Notes
+
+Redis is optional. Configure it from the Python dashboard Settings modal or at
+startup:
+
+```bash
+./moving_target_osm_dashboard.py --redis-url redis://127.0.0.1:6379/0 --redis-prefix moving_client_data
+```
+
+The Settings modal includes a GCP Memorystore Redis planner. It generates the
+`gcloud redis instances create ...` commands on the Python backend and stores
+the plan in memory, but it does not execute `gcloud` or create billable GCP
+resources.
+
+Browser GPS records include `accuracy_m`, `gps_accuracy_m`, altitude/speed
+fields when available, and the latest latency array plus latency summary. The
+map auto-pans to each browser GPS fix while the browser GPS watch is active.
+
 ## Offline Collector
 
 Collect samples to JSONL:
