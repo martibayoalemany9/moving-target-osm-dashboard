@@ -51,3 +51,45 @@ Render a static HTML map:
 
 ADB data requires an authorized Android device with USB debugging enabled.
 Browser GPS and accelerometer data require browser/OS permission.
+
+## Android Auto Companion
+
+This repository includes a native Android Auto companion app in `android-auto/`.
+It uses the Android for Cars App Library template surface to display a compact,
+driver-safe view of the latest dashboard sample.
+
+Build the debug APK:
+
+```bash
+cd android-auto
+ANDROID_HOME=/Users/username/Library/Android/sdk ./gradlew assembleDebug
+```
+
+The APK is generated at:
+
+```text
+android-auto/app/build/outputs/apk/debug/app-debug.apk
+```
+
+For Desktop Head Unit testing with the Python dashboard running on the Mac:
+
+```bash
+./moving_target_osm_dashboard.py
+adb install android-auto/app/build/outputs/apk/debug/app-debug.apk
+adb reverse tcp:8765 tcp:8765
+adb forward tcp:5277 tcp:5277
+/Users/username/Library/Android/sdk/extras/google/auto/desktop-head-unit
+```
+
+The phone app stores the samples endpoint used by the car template. The default
+is `http://127.0.0.1:8765/api/samples`, which works with `adb reverse`.
+
+Useful Android telephony diagnostics:
+
+```bash
+adb devices
+adb logcat -b radio
+adb bugreport bugreport.zip
+adb shell dumpsys telephony
+adb shell dumpsys connectivity
+```

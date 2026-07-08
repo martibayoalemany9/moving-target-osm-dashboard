@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Moving Target</string>
+    <string name="car_app_name">Moving Target OSM</string>
+    <string name="default_samples_url">http://127.0.0.1:8765/api/samples</string>
+</resources>

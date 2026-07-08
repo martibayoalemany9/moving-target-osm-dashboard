@@ -16,3 +16,8 @@ tools/osm_extracts/
 *.osm.pbf
 
 .DS_Store
+
+android-auto/.gradle/
+android-auto/build/
+android-auto/local.properties
+android-auto/app/build/
